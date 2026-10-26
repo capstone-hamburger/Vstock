@@ -1,0 +1,10 @@
+spring:
+  # 루트의 .env 파일이 있으면 프로퍼티로 읽는다 (없으면 OS 환경변수 사용)
+  config:
+    import: optional:file:.env[.properties]
+
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
