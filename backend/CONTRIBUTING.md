@@ -1,5 +1,8 @@
-# Vstock-backend
-캡스톤 백엔드 레포
+# 백엔드 코드 컨벤션
+
+Vstock 백엔드(`backend/`)의 코드 작성 규칙.
+
+브랜치/커밋/이슈/PR 형식은 루트 [README.md](../README.md), 협업 프로세스는 루트 [CONTRIBUTING.md](../CONTRIBUTING.md)를 따른다.
 
 ---
 
@@ -92,13 +95,35 @@ GET    /orders/{orderId}
 POST   /orders
 PATCH  /orders/{orderId}
 DELETE /orders/{orderId}
-
-GET    /users/{userId}/stocks
-POST   /users/{userId}/orders
 ```
 
 - 동사를 URL에 쓰지 않는다 (HTTP 메서드로 행위 표현).
-- 경로 안에 여러 단어가 필요한 경우 kebab-case를 사용한다 (`/user-stocks` 형태가 필요한 예외적 상황 한정, 기본은 위처럼 중첩 리소스 경로로 표현 권장).
+- 경로 안에 여러 단어가 필요한 경우 kebab-case를 사용한다 (`/user-stocks` 형태가 필요한 예외적 상황 한정, 기본은 중첩 리소스 경로로 표현 권장).
+
+### 본인 리소스는 경로에 userId를 넣지 않는다
+
+로그인한 사용자 **본인**의 데이터를 다루는 API는 `userId`를 경로나 요청 바디로 받지 않는다. `@AuthenticationPrincipal`로 인증 주체를 꺼내 그 값으로 조회한다.
+
+```
+GET    /users/me              # 내 정보 조회
+PATCH  /users/me              # 내 정보 수정
+GET    /users/me/stocks       # 내 보유 주식
+GET    /users/me/orders       # 내 주문 내역
+POST   /orders                # 주문 생성 (주문자는 인증 정보에서 결정)
+```
+
+```java
+@GetMapping("/users/me")
+public UserResponse findMyInfo(@AuthenticationPrincipal CustomUserDetails userDetails) {
+    return userService.findUserById(userDetails.getUserId());
+}
+```
+
+- 클라이언트가 보낸 `userId`를 신뢰하면 남의 정보를 조회·수정할 수 있다 (권한 상승). 식별자는 **항상 서버가 인증 정보에서 가져온다.**
+- Controller에서만 `@AuthenticationPrincipal`을 받고, Service에는 `Long userId`만 넘긴다. Service가 `SecurityContext`를 직접 참조하지 않게 한다 (테스트 용이성).
+- `/users/{userId}`처럼 경로에 식별자를 두는 API는 **관리자용 또는 다른 사용자의 공개 정보 조회**에만 사용하고, 반드시 권한 검증을 둔다.
+
+`CustomUserDetails`(인증 주체 타입)는 로그인/회원가입 작업에서 정의한다.
 
 ---
 
@@ -155,96 +180,3 @@ class BotParameterRepositoryTest { ... }
 @Test
 void 주문_생성_시_초기_상태는_대기중이다() { ... }
 ```
-
----
-
-## 9. Git 브랜치 / 커밋 컨벤션
-
-### 브랜치 전략
-
-- `main`: 배포/발표용 안정 버전. `develop`에서만 머지한다.
-- `develop`: 개발 통합 브랜치. 모든 작업 브랜치는 `develop`에서 생성하고 `develop`으로 PR한다.
-
-### 브랜치명
-
-```
-feat/12-order-creation-api
-fix/15-order-cancel-bug
-refactor/ ...
-docs/ ...
-test/ ...
-chore/ ...
-```
-
-형식: `feat/이슈번호-기능명-대상` (브랜치명은 영어로 기술)
-
-### 커밋 메시지 (Conventional Commits)
-
-타입은 영어 소문자로 쓰고, 내용은 **한국어**로 작성한다.
-
-```
-feat: 주문 생성 API 구현
-fix: 주문 취소 시 체결 수량 계산 오류 수정
-refactor: OrderService에서 도메인 로직 분리
-docs: README에 배포 가이드 추가
-test: OrderServiceTest 케이스 추가
-chore: 의존성 버전 업데이트
-```
-
-| 타입 | 용도 |
-| --- | --- |
-| `feat` | 새 기능 |
-| `fix` | 버그 수정 |
-| `refactor` | 리팩토링 (기능 변화 없음) |
-| `docs` | 문서 수정 |
-| `test` | 테스트 코드 |
-| `chore` | 빌드/설정 등 기타 |
-
----
-
-## 10. Issue 컨벤션
-
-### Issue 제목
-
-`[타입] 이슈 내용` 형식으로 **한국어**로 작성한다. 타입은 PR 컨벤션과 동일하게 사용한다.
-
-```
-[FEAT] 주문 생성 API 구현
-[FIX] 주문 취소 시 체결 수량 계산 오류
-```
-
----
-
-## 11. Pull Request 컨벤션
-
-### PR 제목
-
-`[타입] 이슈 내용` 형식으로 작성하며, 내용은 **한국어**로 작성한다. 타입은 커밋 컨벤션과 동일하게 사용한다.
-
-```
-[FEAT] 주문 생성 API 구현
-[FIX] 주문 취소 시 체결 수량 계산 오류 수정
-[REFACTOR] OrderService에서 도메인 로직 분리
-[DOCS] README에 배포 가이드 추가
-[TEST] OrderServiceTest 케이스 추가
-[CHORE] 의존성 버전 업데이트
-```
-
-| 타입 | 용도 |
-| --- | --- |
-| `FEAT` | 새 기능 |
-| `FIX` | 버그 수정 |
-| `REFACTOR` | 리팩토링 (기능 변화 없음) |
-| `DOCS` | 문서 수정 |
-| `TEST` | 테스트 코드 |
-| `CHORE` | 빌드/설정 등 기타 |
-
-### 리뷰 규칙
-
-- PR은 팀원 최소 1인 이상의 승인(Approve) 후 머지한다.
-- 리뷰어는 24시간 이내 확인을 원칙으로 한다 (급한 건은 별도 공지).
-- 코드 스타일 지적보다 로직/설계 관련 코멘트를 우선한다.
-
-### PR 크기
-
-한 PR은 가능한 한 하나의 기능/수정 단위로 작게 유지한다. 여러 기능이 섞인 대형 PR은 이슈 단위로 쪼개서 올린다.

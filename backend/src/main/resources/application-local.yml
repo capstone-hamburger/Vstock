@@ -1,5 +1,6 @@
 spring:
-  # 루트의 .env 파일이 있으면 프로퍼티로 읽는다 (없으면 OS 환경변수 사용)
+  # backend/.env 파일이 있으면 프로퍼티로 읽는다 (없으면 OS 환경변수 사용)
+  # 실행 디렉터리 기준 경로이므로 backend/ 에서 실행해야 한다
   config:
     import: optional:file:.env[.properties]
 
