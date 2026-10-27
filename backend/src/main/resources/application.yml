@@ -12,3 +12,8 @@ spring:
     properties:
       hibernate:
         format_sql: true
+
+vstock:
+  websocket:
+    # 소켓 핸드셰이크를 허용할 프론트엔드 Origin. 프론트 스택·포트 확정 후 조정한다.
+    allowed-origins: http://localhost:3000,http://localhost:5173

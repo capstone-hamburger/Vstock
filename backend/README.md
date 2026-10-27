@@ -66,6 +66,60 @@ docker compose up -d
 ./gradlew test
 ```
 
+대부분의 테스트는 위 MySQL 컨테이너가 떠 있어야 한다 (`@AutoConfigureTestDatabase(replace = NONE)`). 소켓 테스트만 예외로 DB 없이 돌아간다.
+
+```bash
+./gradlew test --tests "com.example.vstock.global.websocket.*"
+```
+
+---
+
+## WebSocket
+
+종목 상세 화면은 **진입 시 REST로 스냅샷을 받고, 이후 소켓으로 변경분만 받는다.**
+
+| 항목 | 값 |
+| --- | --- |
+| 핸드셰이크 | `ws://localhost:8080/ws` (STOMP) |
+| 구독 prefix | `/topic` |
+| 발행 prefix | `/app` (클라이언트 → 서버) |
+| 체결가 경로 | `/topic/stocks/{stockId}/price` |
+| 호가 경로 | `/topic/stocks/{stockId}/orderbook` |
+
+경로는 `WebSocketDestination`으로만 만들고 문자열을 직접 쓰지 않는다. 서버에서 발행할 때는 `WebSocketMessageSender`를 주입받아 쓴다.
+
+```java
+messageSender.send(WebSocketDestination.stockPrice(stockId), payload);
+```
+
+### 허용 Origin
+
+소켓 핸드셰이크는 CORS 대상이 아니라 Origin을 따로 허용해야 한다. `application.yml`의 값을 프론트 dev 서버 포트에 맞게 조정한다.
+
+```yaml
+vstock:
+  websocket:
+    allowed-origins: http://localhost:3000,http://localhost:5173
+```
+
+### 로컬 확인
+
+앱을 띄운 뒤 브라우저 콘솔에서 확인한다 (허용 Origin에 포함된 페이지에서 실행해야 한다).
+
+```js
+const client = new StompJs.Client({ brokerURL: 'ws://localhost:8080/ws' });
+client.onConnect = () => {
+  client.subscribe('/topic/stocks/1/price', (msg) => console.log(JSON.parse(msg.body)));
+};
+client.activate();
+```
+
+구독자가 없을 때 발행된 메시지는 예외 없이 버려진다. 놓친 구간은 REST 스냅샷으로 다시 받는 것을 전제한다.
+
+> 현재 브로커는 **인메모리**다. 서버를 여러 대로 늘리면 인스턴스별로 구독이 분리되므로 외부 브로커(Redis/RabbitMQ)로 교체해야 한다.
+>
+> 차트·호가창 REST 조회 API와 실제 발행 지점(체결 엔진 연동)은 후속 이슈 범위다.
+
 ---
 
 ## 패키지 구조
