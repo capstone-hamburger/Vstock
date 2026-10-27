@@ -2,6 +2,7 @@ package com.example.vstock.global.websocket;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.vstock.domain.stock.service.StockMessagePublisher;
 import com.example.vstock.global.config.WebSocketConfig;
 import java.lang.reflect.Type;
 import java.util.concurrent.BlockingQueue;
@@ -49,16 +50,16 @@ class WebSocketStompIntegrationTest {
     private int port;
 
     @Autowired
-    private WebSocketMessageSender messageSender;
+    private StockMessagePublisher publisher;
 
     @Test
     void 구독한_종목_체결가_경로로_발행하면_메시지를_수신한다() throws Exception {
         StompSession session = connect();
-        String destination = WebSocketDestination.stockPrice(1L);
-        BlockingQueue<PriceMessage> received = subscribe(session, destination, PriceMessage.class);
+        BlockingQueue<PriceMessage> received =
+                subscribe(session, WebSocketDestination.stockPrice(1L), PriceMessage.class);
 
         PriceMessage message = awaitFirst(
-                received, () -> messageSender.send(destination, new PriceMessage(1L, 10_500L)));
+                received, () -> publisher.publishPrice(1L, new PriceMessage(1L, 10_500L)));
 
         assertThat(message.stockId()).isEqualTo(1L);
         assertThat(message.price()).isEqualTo(10_500L);
@@ -68,13 +69,27 @@ class WebSocketStompIntegrationTest {
     @Test
     void 호가_경로도_같은_방식으로_수신한다() throws Exception {
         StompSession session = connect();
-        String destination = WebSocketDestination.stockOrderbook(1L);
-        BlockingQueue<PriceMessage> received = subscribe(session, destination, PriceMessage.class);
+        BlockingQueue<PriceMessage> received =
+                subscribe(session, WebSocketDestination.stockOrderbook(1L), PriceMessage.class);
 
         PriceMessage message = awaitFirst(
-                received, () -> messageSender.send(destination, new PriceMessage(1L, 9_900L)));
+                received, () -> publisher.publishOrderbook(1L, new PriceMessage(1L, 9_900L)));
 
         assertThat(message.price()).isEqualTo(9_900L);
+        session.disconnect();
+    }
+
+    @Test
+    void 체결가와_호가_경로는_서로_섞이지_않는다() throws Exception {
+        StompSession session = connect();
+        BlockingQueue<PriceMessage> fromPrice =
+                subscribe(session, WebSocketDestination.stockPrice(1L), PriceMessage.class);
+        BlockingQueue<PriceMessage> fromOrderbook =
+                subscribe(session, WebSocketDestination.stockOrderbook(1L), PriceMessage.class);
+
+        awaitFirst(fromOrderbook, () -> publisher.publishOrderbook(1L, new PriceMessage(1L, 9_900L)));
+
+        assertThat(fromPrice.poll(SETTLE_MILLIS, TimeUnit.MILLISECONDS)).isNull();
         session.disconnect();
     }
 
@@ -88,13 +103,13 @@ class WebSocketStompIntegrationTest {
     @Test
     void 다른_종목으로_발행한_메시지는_수신하지_않는다() throws Exception {
         StompSession session = connect();
-        String stock1 = WebSocketDestination.stockPrice(1L);
-        String stock2 = WebSocketDestination.stockPrice(2L);
-        BlockingQueue<PriceMessage> fromStock1 = subscribe(session, stock1, PriceMessage.class);
-        BlockingQueue<PriceMessage> fromStock2 = subscribe(session, stock2, PriceMessage.class);
+        BlockingQueue<PriceMessage> fromStock1 =
+                subscribe(session, WebSocketDestination.stockPrice(1L), PriceMessage.class);
+        BlockingQueue<PriceMessage> fromStock2 =
+                subscribe(session, WebSocketDestination.stockPrice(2L), PriceMessage.class);
 
         PriceMessage onStock2 = awaitFirst(
-                fromStock2, () -> messageSender.send(stock2, new PriceMessage(2L, 20_000L)));
+                fromStock2, () -> publisher.publishPrice(2L, new PriceMessage(2L, 20_000L)));
 
         assertThat(onStock2.stockId()).isEqualTo(2L);
         assertThat(fromStock1.poll(SETTLE_MILLIS, TimeUnit.MILLISECONDS)).isNull();
@@ -156,7 +171,13 @@ class WebSocketStompIntegrationTest {
             DataSourceTransactionManagerAutoConfiguration.class,
             HibernateJpaAutoConfiguration.class
     })
-    @Import({WebSocketConfig.class, WebSocketMessageSender.class})
+    @Import({
+            WebSocketConfig.class,
+            StompAuthChannelInterceptor.class,
+            StompEventListener.class,
+            WebSocketErrorHandler.class,
+            StockMessagePublisher.class
+    })
     static class SocketOnlyApp {
     }
 }
