@@ -1,5 +1,7 @@
 package com.example.vstock.domain.stock.service;
 
+import com.example.vstock.domain.stock.dto.CandleResponse;
+import com.example.vstock.domain.stock.entity.CandleInterval;
 import com.example.vstock.global.websocket.WebSocketDestination;
 import lombok.RequiredArgsConstructor;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -25,5 +27,10 @@ public class StockMessagePublisher {
     /** 호가 변동을 발행한다. payload 타입은 호가창 기능에서 DTO로 구체화한다. */
     public void publishOrderbook(Long stockId, Object payload) {
         messagingTemplate.convertAndSend(WebSocketDestination.stockOrderbook(stockId), payload);
+    }
+
+    /** 진행 중이거나 마감된 봉의 전체 상태를 발행한다. 클라이언트는 같은 time의 봉을 교체한다. */
+    public void publishCandle(Long stockId, CandleInterval interval, CandleResponse candle) {
+        messagingTemplate.convertAndSend(WebSocketDestination.stockCandle(stockId, interval.getCode()), candle);
     }
 }
