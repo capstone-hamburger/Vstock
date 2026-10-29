@@ -170,3 +170,61 @@ com.example.vstock
 ## IntelliJ 설정
 
 모노레포 전환으로 Gradle 프로젝트 루트가 `backend/`로 내려갔다. 기존에 레포 루트로 프로젝트를 열어 뒀다면 `backend/build.gradle`을 Gradle 프로젝트로 다시 import한다.
+
+---
+
+## 주문 API
+
+이전한 주문 API는 회원 ID를 경로로 받는 프로토타입이다. 세션·JWT 인증은 아직 없으므로 회원 ID가 일치하는지 확인하는 것은 본인 인증을 의미하지 않는다. 최신 코드 컨벤션은 인증 주체에서 회원 ID를 가져오도록 요구한다. 로그인·인증 구현과 통합할 때 `@AuthenticationPrincipal`을 사용하고 주문 경로를 `POST /orders`, `DELETE /orders/{orderId}`로 전환해야 한다.
+
+### 매수·매도 요청
+
+`POST /users/{userId}/orders`
+
+```json
+{
+  "stockId": 1,
+  "type": "BUY",
+  "quantity": 10,
+  "price": 10000
+}
+```
+
+- `type`은 `BUY`(매수) 또는 `SELL`(매도)이다. 현재는 지정가 주문만 지원한다.
+- 종목 ID·수량·가격은 양의 정수이며 주문 금액은 `long` 범위 이내여야 한다.
+- 성공하면 `201 Created`와 `PENDING` 주문을 반환한다. 주문 접수는 체결 완료를 의미하지 않는다.
+- 매수는 모든 종목의 미체결 매수 예약금을 잔고에서 제외하고 검사한다.
+- 매도는 해당 종목의 미체결 매도 예약 수량을 보유 수량에서 제외하고 검사한다.
+- 같은 회원의 주문 생성·취소는 회원 행 잠금과 하나의 트랜잭션으로 처리한다.
+
+### 매수·매도 취소
+
+`DELETE /users/{userId}/orders/{orderId}`
+
+- 성공하면 `200 OK`와 `CANCELED` 주문을 반환한다. 주문 행은 삭제하지 않는다.
+- 경로의 회원이 소유한 대기 주문만 취소할 수 있다. 봇 주문은 이 API로 취소하지 않는다.
+- 일부 체결된 주문은 기존 `filledQuantity`를 유지하고 미체결 잔량의 예약만 해제한다.
+- 체결 완료·이미 취소된 주문은 `409 Conflict`를 반환한다.
+
+주문 접수·취소는 실제 잔고와 보유 수량을 증감하지 않는다. 예약은 `PENDING` 주문의 `quantity - filledQuantity`로 계산한다. 추후 체결 처리는 같은 회원 잠금 순서(회원 → 주문)를 따르고, 실제 잔고·보유 수량·체결 수량을 함께 갱신해야 한다.
+
+## 현재가 조회
+
+`GET /stocks/{stockId}`
+
+```json
+{
+  "stockId": 1,
+  "name": "브이스톡",
+  "currentPrice": 10000
+}
+```
+
+DB에 저장된 현재가를 조회한다. 주문 접수만으로 현재가를 바꾸지 않는다. C 체결 엔진과 WebSocket 시세 갱신은 아직 연결하지 않았다.
+
+## 응답과 확인 방법
+
+- 잘못된 입력: `400 Bad Request`
+- 없는 회원·종목·주문 또는 경로의 회원이 소유하지 않은 주문: `404 Not Found`
+- 잔고·보유 수량 부족 또는 취소 불가능한 상태: `409 Conflict`
+- IntelliJ HTTP Client 예시는 `http/orders.http`에 있다. DB에 존재하는 회원·종목 ID와 응답으로 받은 주문 ID를 입력해 사용한다.
