@@ -1,0 +1,37 @@
+# DB에 존재하는 회원·종목 ID를 입력한다. 주문 ID는 생성 응답에서 확인한다.
+@baseUrl = http://localhost:8080
+@userId = 1
+@stockId = 1
+@buyOrderId = 1
+@sellOrderId = 2
+
+### 매수 요청
+POST {{baseUrl}}/users/{{userId}}/orders
+Content-Type: application/json
+
+{
+  "stockId": {{stockId}},
+  "type": "BUY",
+  "quantity": 1,
+  "price": 10000
+}
+
+### 매도 요청 (보유 주식이 있는 회원)
+POST {{baseUrl}}/users/{{userId}}/orders
+Content-Type: application/json
+
+{
+  "stockId": {{stockId}},
+  "type": "SELL",
+  "quantity": 1,
+  "price": 10000
+}
+
+### 매수 주문 취소
+DELETE {{baseUrl}}/users/{{userId}}/orders/{{buyOrderId}}
+
+### 매도 주문 취소
+DELETE {{baseUrl}}/users/{{userId}}/orders/{{sellOrderId}}
+
+### 현재가 조회
+GET {{baseUrl}}/stocks/{{stockId}}
