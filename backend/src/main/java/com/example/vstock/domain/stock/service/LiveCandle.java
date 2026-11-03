@@ -25,16 +25,26 @@ final class LiveCandle {
         this.close = firstPrice;
     }
 
-    /** 저장된 1분봉들(시간순)로 상위 봉의 진행 상태를 복원한다. */
-    static LiveCandle restoreFrom(LocalDateTime startTime, List<StockCandle> minuteCandles) {
-        LiveCandle live = new LiveCandle(startTime, minuteCandles.get(0).getOpenPrice());
-        for (StockCandle minute : minuteCandles) {
-            live.high = Math.max(live.high, minute.getHighPrice());
-            live.low = Math.min(live.low, minute.getLowPrice());
-            live.close = minute.getClosePrice();
-            live.volume += minute.getVolume();
-        }
+    /** 저장된 봉 하나를 같은 값의 LiveCandle로 옮긴다. 상위 봉을 복구할 때 재료로 쓴다. */
+    static LiveCandle fromStored(StockCandle stored) {
+        LiveCandle live = new LiveCandle(stored.getTimestamp(), stored.getOpenPrice());
+        live.high = stored.getHighPrice();
+        live.low = stored.getLowPrice();
+        live.close = stored.getClosePrice();
+        live.volume = stored.getVolume();
         return live;
+    }
+
+    /** 시간순으로 놓인 낮은 간격의 봉들을 한 개의 상위 봉으로 합친다. parts는 비어 있으면 안 된다. */
+    static LiveCandle combine(LocalDateTime startTime, List<LiveCandle> parts) {
+        LiveCandle combined = new LiveCandle(startTime, parts.get(0).open);
+        for (LiveCandle part : parts) {
+            combined.high = Math.max(combined.high, part.high);
+            combined.low = Math.min(combined.low, part.low);
+            combined.close = part.close;
+            combined.volume += part.volume;
+        }
+        return combined;
     }
 
     void apply(long price, long quantity, long seq) {

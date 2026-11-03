@@ -1,15 +1,17 @@
 package com.example.vstock.domain.stock.service;
 
 import com.example.vstock.domain.stock.dto.CandleResponse;
+import com.example.vstock.domain.stock.dto.FindCandleListResponse;
+import com.example.vstock.domain.stock.dto.StockResponse;
 import com.example.vstock.domain.stock.entity.CandleInterval;
+import com.example.vstock.domain.stock.entity.Stock;
 import com.example.vstock.domain.stock.entity.StockCandle;
 import com.example.vstock.domain.stock.repository.StockCandleRepository;
 import com.example.vstock.domain.stock.repository.StockRepository;
 import com.example.vstock.global.common.MarketTime;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -27,70 +29,79 @@ public class StockService {
     public static final int MAX_CANDLE_LIMIT = 1000;
 
     private final StockRepository stockRepository;
+    private final LatestPriceStore latestPriceStore;
     private final StockCandleRepository candleRepository;
     private final CandleAggregator candleAggregator;
     private final Clock clock;
 
     /**
-     * 저장된 1분봉을 interval에 맞게 집계하고, 메모리의 진행 중인 봉을 마지막에 붙여 시간 오름차순으로 돌려준다.
-     * 체결이 없던 구간은 봉을 만들지 않는다.
-     *
-     * @param from  null이면 to에서 limit개 봉만큼 거슬러 올라간 시각
-     * @param to    null이면 지금
-     * @param limit null이면 {@value #DEFAULT_CANDLE_LIMIT}, 최대 {@value #MAX_CANDLE_LIMIT}
+     * 종목 정보와 현재가. 현재가는 메모리의 최근 체결가를 우선하고, 없으면 DB에 저장된 값을 쓴다.
+     * 소켓으로 받는 시세와 같은 기준이라, 이 응답을 받은 뒤 구독을 시작해도 값이 어긋나지 않는다.
      */
-    public List<CandleResponse> findCandles(Long stockId, String intervalCode,
-                                            OffsetDateTime from, OffsetDateTime to, Integer limit) {
+    public StockResponse findStockById(Long stockId) {
+        Stock stock = stockRepository.findById(stockId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "존재하지 않는 종목입니다. stockId=" + stockId));
+
+        long currentPrice = latestPriceStore.findPrice(stockId).orElse(stock.getCurrentPrice());
+        return StockResponse.of(stock, currentPrice);
+    }
+
+    /**
+     * 요청한 간격으로 저장된 봉을 최신 limit개 읽고, 조회 구간이 현재까지 닿아 있으면 메모리의
+     * 진행 중인 봉을 마지막에 붙여 시간 오름차순으로 돌려준다. 집계는 하지 않는다.
+     * 체결이 없던 구간은 봉이 없다.
+     *
+     * @param from   이 시각(epoch 초) 이후의 봉만. null이면 제한 없음
+     * @param before 이 시각(epoch 초) 이전에 시작한 봉만. null이면 지금까지
+     * @param limit  null이면 {@value #DEFAULT_CANDLE_LIMIT}, 최대 {@value #MAX_CANDLE_LIMIT}
+     */
+    public FindCandleListResponse findCandles(Long stockId, String intervalCode,
+                                              Long from, Long before, Integer limit) {
         CandleInterval interval = parseInterval(intervalCode);
         int size = resolveLimit(limit);
         if (!stockRepository.existsById(stockId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "존재하지 않는 종목입니다. stockId=" + stockId);
         }
 
-        LocalDateTime end = to == null
-                ? LocalDateTime.now(clock).plusSeconds(1)
-                : to.atZoneSameInstant(MarketTime.ZONE).toLocalDateTime();
-        LocalDateTime begin = from == null
-                ? end.minusSeconds((long) interval.getSeconds() * size)
-                : from.atZoneSameInstant(MarketTime.ZONE).toLocalDateTime();
-        if (!begin.isBefore(end)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "from은 to보다 이전이어야 합니다.");
+        long fromEpoch = from == null ? 0L : from;
+        long beforeEpoch = before == null ? clock.instant().getEpochSecond() + 1 : before;
+        if (fromEpoch >= beforeEpoch) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "from은 before보다 이전이어야 합니다.");
         }
-        begin = interval.bucketStart(begin);
 
-        List<CandleResponse> candles = findStoredCandles(stockId, interval, begin, end, size);
-        mergeCurrentCandle(candles, stockId, interval, begin, end);
-        return candles;
-    }
+        CandleResponse live = findLiveCandleInRange(stockId, interval, fromEpoch, beforeEpoch);
+        int storedLimit = live == null ? size : size - 1;
 
-    private List<CandleResponse> findStoredCandles(Long stockId, CandleInterval interval,
-                                                   LocalDateTime from, LocalDateTime to, int limit) {
+        // 한 개 더 읽어서 더 과거의 봉이 남았는지 확인한다.
+        List<StockCandle> rows = candleRepository.findCandlesBefore(
+                stockId, interval, toLocalDateTime(fromEpoch), toLocalDateTime(beforeEpoch),
+                PageRequest.of(0, storedLimit + 1));
+        boolean hasMore = rows.size() > storedLimit;
+
         List<CandleResponse> candles = new ArrayList<>();
-        if (interval == CandleInterval.ONE_MINUTE) {
-            for (StockCandle candle : candleRepository.findLatestCandles(stockId, from, to, PageRequest.of(0, limit))) {
-                candles.add(toResponse(candle));
-            }
-        } else {
-            for (Object[] row : candleRepository.findAggregatedCandles(stockId, from, to, interval.getSeconds(), limit)) {
-                candles.add(toResponse(row));
-            }
+        for (StockCandle row : rows.subList(0, Math.min(rows.size(), storedLimit))) {
+            candles.add(toResponse(row));
         }
         // 조회는 최신순이므로 차트가 쓰는 오름차순으로 뒤집는다.
         Collections.reverse(candles);
-        return candles;
+        if (live != null) {
+            candles.removeIf(candle -> candle.time() == live.time());
+            candles.add(live);
+        }
+
+        Long nextBefore = hasMore ? candles.get(0).time() : null;
+        return new FindCandleListResponse(interval.getCode(), candles, nextBefore);
     }
 
-    // 진행 중인 봉은 DB 집계보다 정확하므로 같은 시작 시각의 봉을 교체한다.
-    private void mergeCurrentCandle(List<CandleResponse> candles, Long stockId, CandleInterval interval,
-                                    LocalDateTime from, LocalDateTime to) {
+    // 조회 구간이 현재까지 닿아 있을 때만 진행 중인 봉을 붙인다. 과거 구간을 볼 때는 붙이지 않는다.
+    private CandleResponse findLiveCandleInRange(Long stockId, CandleInterval interval,
+                                                 long fromEpoch, long beforeEpoch) {
         CandleResponse live = candleAggregator.findCurrentCandle(stockId, interval);
-        if (live == null
-                || live.time() < MarketTime.toEpochSecond(from)
-                || live.time() >= MarketTime.toEpochSecond(to)) {
-            return;
+        if (live == null || live.time() < fromEpoch || live.time() >= beforeEpoch) {
+            return null;
         }
-        candles.removeIf(candle -> candle.time() == live.time());
-        candles.add(live);
+        return live;
     }
 
     private CandleInterval parseInterval(String intervalCode) {
@@ -112,18 +123,13 @@ public class StockService {
         return limit;
     }
 
-    private CandleResponse toResponse(StockCandle candle) {
-        return new CandleResponse(MarketTime.toEpochSecond(candle.getStartTime()),
-                candle.getOpenPrice(), candle.getHighPrice(), candle.getLowPrice(), candle.getClosePrice(),
-                candle.getVolume(), true, 0);
+    private LocalDateTime toLocalDateTime(long epochSecond) {
+        return LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSecond), MarketTime.ZONE);
     }
 
-    // findAggregatedCandles의 컬럼 순서: bucket_epoch, open, high, low, close, volume
-    private CandleResponse toResponse(Object[] row) {
-        LocalDateTime start = LocalDateTime.ofEpochSecond(((Number) row[0]).longValue(), 0, ZoneOffset.UTC);
-        return new CandleResponse(MarketTime.toEpochSecond(start),
-                ((Number) row[1]).longValue(), ((Number) row[2]).longValue(),
-                ((Number) row[3]).longValue(), ((Number) row[4]).longValue(),
-                ((Number) row[5]).longValue(), true, 0);
+    private CandleResponse toResponse(StockCandle candle) {
+        return new CandleResponse(MarketTime.toEpochSecond(candle.getTimestamp()),
+                candle.getOpenPrice(), candle.getHighPrice(), candle.getLowPrice(), candle.getClosePrice(),
+                candle.getVolume(), true, 0);
     }
 }

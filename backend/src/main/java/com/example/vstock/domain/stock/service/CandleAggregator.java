@@ -3,13 +3,14 @@ package com.example.vstock.domain.stock.service;
 import com.example.vstock.domain.stock.dto.CandleResponse;
 import com.example.vstock.domain.stock.entity.CandleInterval;
 import com.example.vstock.domain.stock.entity.Stock;
-import com.example.vstock.domain.stock.event.TradeEvent;
 import com.example.vstock.domain.stock.entity.StockCandle;
+import com.example.vstock.domain.stock.event.TradeEvent;
 import com.example.vstock.domain.stock.repository.StockCandleRepository;
 import com.example.vstock.domain.stock.repository.StockRepository;
 import com.example.vstock.global.common.MarketTime;
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -24,10 +25,12 @@ import org.springframework.transaction.event.TransactionalEventListener;
 
 /**
  * 체결을 받아 종목별·interval별 진행 중인 봉을 메모리에서 갱신하고 소켓으로 푸시한다.
- * 1분봉이 마감될 때만 DB에 저장하며, 5분봉·1시간봉·일봉은 저장하지 않는다.
+ * 봉이 마감될 때 그 간격의 봉을 DB에 저장한다. 1분봉부터 1달봉까지 모두 저장하므로 조회는 계산 없이
+ * 요청한 간격의 행만 읽는다.
  *
  * 모든 상태 접근은 이 객체의 락 안에서 일어난다. 종목 수가 적고 갱신이 가벼워 락 하나로 충분하다.
- * 서버가 재시작되면 진행 중이던 1분봉은 유실되고, 상위 봉은 저장된 1분봉으로 복구한다.
+ * 서버가 재시작되면 진행 중이던 1분봉은 유실되고, 나머지 진행 중인 봉은 한 단계 낮은 간격의
+ * 저장된 봉으로 다시 채운다.
  */
 @Slf4j
 @Component
@@ -93,28 +96,44 @@ public class CandleAggregator {
         }
     }
 
-    /** 서버 시작 시 저장된 1분봉으로 5분봉·1시간봉·일봉의 진행 상태를 복구한다. 1분봉은 복구할 수 없다. */
+    /**
+     * 서버 시작 시 진행 중인 봉을 복구한다. 낮은 간격부터 차례로, 한 단계 낮은 간격의 저장된 봉과
+     * 방금 복구한 낮은 간격의 진행 중인 봉을 합쳐 채운다. 1분봉은 복구할 수 없다.
+     * 예: 09:44에 시작하면 10분봉은 1분봉 09:40~09:43으로, 1시간봉은 저장된 10분봉 09:00~09:30과
+     * 방금 복구한 10분봉 09:40으로 채운다.
+     */
     @EventListener(ApplicationReadyEvent.class)
     public synchronized void restore() {
         try {
             LocalDateTime now = LocalDateTime.now(clock);
             for (Stock stock : stockRepository.findAll()) {
                 for (CandleInterval interval : CandleInterval.values()) {
-                    if (interval == CandleInterval.ONE_MINUTE) {
-                        continue;
-                    }
-                    LocalDateTime start = interval.bucketStart(now);
-                    List<StockCandle> minutes =
-                            candleRepository.findCandlesAscending(stock.getStockId(), start, now);
-                    if (!minutes.isEmpty()) {
-                        current.put(new CandleKey(stock.getStockId(), interval),
-                                LiveCandle.restoreFrom(start, minutes));
+                    if (interval.getLower() != null) {
+                        restoreFromLower(stock.getStockId(), interval, now);
                     }
                 }
             }
         } catch (RuntimeException e) {
             // 복구 실패로 서버 기동까지 막지 않는다. 다음 체결부터 새로 쌓인다.
             log.error("진행 중인 봉 복구에 실패했다.", e);
+        }
+    }
+
+    private void restoreFromLower(Long stockId, CandleInterval interval, LocalDateTime now) {
+        CandleInterval lower = interval.getLower();
+        LocalDateTime start = interval.bucketStart(now);
+
+        List<LiveCandle> parts = new ArrayList<>();
+        for (StockCandle stored : candleRepository.findCandlesAscending(stockId, lower, start, now)) {
+            parts.add(LiveCandle.fromStored(stored));
+        }
+        LiveCandle lowerLive = current.get(new CandleKey(stockId, lower));
+        if (lowerLive != null && !lowerLive.startTime().isBefore(start)) {
+            parts.add(lowerLive);
+        }
+
+        if (!parts.isEmpty()) {
+            current.put(new CandleKey(stockId, interval), LiveCandle.combine(start, parts));
         }
     }
 
@@ -125,19 +144,18 @@ public class CandleAggregator {
     }
 
     private void finish(CandleKey key, LiveCandle live) {
-        if (key.interval() == CandleInterval.ONE_MINUTE) {
-            persist(key.stockId(), live);
-        }
+        persist(key, live);
         messagePublisher.publishCandle(key.stockId(), key.interval(), live.toResponse(true));
     }
 
     // 저장이 끝난 뒤에 마감 메시지를 보낸다. 저장이 실패해도 체결 처리는 계속한다.
-    private void persist(Long stockId, LiveCandle live) {
+    private void persist(CandleKey key, LiveCandle live) {
         try {
-            candleRepository.upsertCandle(stockId, live.startTime(),
+            candleRepository.upsertCandle(key.stockId(), key.interval(), live.startTime(),
                     live.open(), live.high(), live.low(), live.close(), live.volume());
         } catch (RuntimeException e) {
-            log.error("1분봉 저장에 실패했다. stockId={}, startTime={}", stockId, live.startTime(), e);
+            log.error("봉 저장에 실패했다. stockId={}, interval={}, startTime={}",
+                    key.stockId(), key.interval().getCode(), live.startTime(), e);
         }
     }
 

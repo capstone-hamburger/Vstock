@@ -13,5 +13,6 @@ import lombok.NoArgsConstructor;
 public class StockCandleId implements Serializable {
 
     private Long stockId;
-    private LocalDateTime startTime;
+    private CandleInterval candleInterval;
+    private LocalDateTime timestamp;
 }
