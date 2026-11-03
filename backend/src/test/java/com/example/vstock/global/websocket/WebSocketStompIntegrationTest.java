@@ -2,9 +2,14 @@ package com.example.vstock.global.websocket;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.vstock.domain.stock.dto.PriceResponse;
+import com.example.vstock.domain.stock.event.TradeEvent;
+import com.example.vstock.domain.stock.service.LatestPriceStore;
 import com.example.vstock.domain.stock.service.StockMessagePublisher;
+import com.example.vstock.domain.stock.service.StockPriceListener;
 import com.example.vstock.global.config.WebSocketConfig;
 import java.lang.reflect.Type;
+import java.time.Instant;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -16,8 +21,11 @@ import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceTransactionManagerAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
+import org.springframework.messaging.simp.broker.SimpleBrokerMessageHandler;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.messaging.converter.JacksonJsonMessageConverter;
 import org.springframework.messaging.simp.stomp.StompFrameHandler;
 import org.springframework.messaging.simp.stomp.StompHeaders;
@@ -51,6 +59,12 @@ class WebSocketStompIntegrationTest {
 
     @Autowired
     private StockMessagePublisher publisher;
+
+    @Autowired
+    private ApplicationEventPublisher eventPublisher;
+
+    @Autowired
+    private SimpleBrokerMessageHandler brokerMessageHandler;
 
     @Test
     void 구독한_종목_체결가_경로로_발행하면_메시지를_수신한다() throws Exception {
@@ -116,6 +130,101 @@ class WebSocketStompIntegrationTest {
         session.disconnect();
     }
 
+    @Test
+    void 체결이_발생하면_구독자에게_바뀐_현재가가_푸시된다() throws Exception {
+        StompSession session = connect();
+        BlockingQueue<PriceResponse> received =
+                subscribe(session, WebSocketDestination.stockPrice(1L), PriceResponse.class);
+        Instant executedAt = Instant.parse("2026-10-27T01:00:00Z");
+
+        PriceResponse message = awaitFirst(received, () -> eventPublisher.publishEvent(
+                new TradeEvent(1L, 10_700L, 3L, executedAt)));
+
+        assertThat(message.stockId()).isEqualTo(1L);
+        assertThat(message.price()).isEqualTo(10_700L);
+        assertThat(message.quantity()).isEqualTo(3L);
+        assertThat(message.executedAt()).isEqualTo(executedAt.toEpochMilli());
+        session.disconnect();
+    }
+
+    @Test
+    void 연결을_끊으면_세션이_닫히고_이후_체결이_발생해도_서버는_정상이다() throws Exception {
+        StompSession session = connect();
+        BlockingQueue<PriceResponse> received =
+                subscribe(session, WebSocketDestination.stockPrice(3L), PriceResponse.class);
+        awaitFirst(received, () -> eventPublisher.publishEvent(
+                new TradeEvent(3L, 10_000L, 1L, Instant.parse("2026-10-27T01:00:00Z"))));
+
+        session.disconnect();
+
+        assertThat(session.isConnected()).isFalse();
+        received.clear();
+        eventPublisher.publishEvent(new TradeEvent(3L, 10_100L, 1L, Instant.parse("2026-10-27T01:00:01Z")));
+        assertThat(received.poll(SETTLE_MILLIS, TimeUnit.MILLISECONDS)).isNull();
+
+        // 끊긴 세션이 남아 있지 않다면 새 연결은 정상적으로 같은 경로를 구독해 수신한다.
+        StompSession reconnected = connect();
+        BlockingQueue<PriceResponse> again =
+                subscribe(reconnected, WebSocketDestination.stockPrice(3L), PriceResponse.class);
+        PriceResponse message = awaitFirst(again, () -> eventPublisher.publishEvent(
+                new TradeEvent(3L, 10_200L, 1L, Instant.parse("2026-10-27T01:00:02Z"))));
+        assertThat(message.price()).isEqualTo(10_200L);
+        reconnected.disconnect();
+    }
+
+    @Test
+    void 구독을_해제하면_더_이상_수신하지_않는다() throws Exception {
+        StompSession session = connect();
+        BlockingQueue<PriceMessage> received = new LinkedBlockingQueue<>();
+        StompSession.Subscription subscription = session.subscribe(
+                WebSocketDestination.stockPrice(4L), new StompFrameHandler() {
+                    @Override
+                    public Type getPayloadType(StompHeaders headers) {
+                        return PriceMessage.class;
+                    }
+
+                    @Override
+                    public void handleFrame(StompHeaders headers, Object payload) {
+                        received.add((PriceMessage) payload);
+                    }
+                });
+        awaitFirst(received, () -> publisher.publishPrice(4L, new PriceMessage(4L, 1L)));
+
+        subscription.unsubscribe();
+        // UNSUBSCRIBE가 처리된 뒤에 발행되도록 같은 세션에서 다른 구독을 하나 더 확인한다.
+        BlockingQueue<PriceMessage> marker =
+                subscribe(session, WebSocketDestination.stockPrice(5L), PriceMessage.class);
+        awaitFirst(marker, () -> publisher.publishPrice(5L, new PriceMessage(5L, 1L)));
+        received.clear();
+        publisher.publishPrice(4L, new PriceMessage(4L, 2L));
+
+        assertThat(received.poll(SETTLE_MILLIS, TimeUnit.MILLISECONDS)).isNull();
+        session.disconnect();
+    }
+
+    @Test
+    void 클라이언트가_시세_경로로_직접_발행하면_구독자에게_전달되지_않는다() throws Exception {
+        StompSession subscriber = connect();
+        BlockingQueue<PriceMessage> received =
+                subscribe(subscriber, WebSocketDestination.stockPrice(6L), PriceMessage.class);
+        BlockingQueue<PriceMessage> marker =
+                subscribe(subscriber, WebSocketDestination.stockPrice(7L), PriceMessage.class);
+        awaitFirst(marker, () -> publisher.publishPrice(7L, new PriceMessage(7L, 1L)));
+
+        StompSession attacker = connect();
+        attacker.send(WebSocketDestination.stockPrice(6L), new PriceMessage(6L, 1L));
+
+        assertThat(received.poll(SETTLE_MILLIS, TimeUnit.MILLISECONDS)).isNull();
+        subscriber.disconnect();
+    }
+
+    @Test
+    void 응답하지_않는_연결을_정리하도록_하트비트가_설정돼_있다() {
+        assertThat(brokerMessageHandler.getHeartbeatValue())
+                .containsExactly(WebSocketConfig.HEARTBEAT_MILLIS, WebSocketConfig.HEARTBEAT_MILLIS);
+        assertThat(brokerMessageHandler.getTaskScheduler()).isNotNull();
+    }
+
     private StompSession connect() throws Exception {
         WebSocketStompClient stompClient = new WebSocketStompClient(new StandardWebSocketClient());
         stompClient.setMessageConverter(new JacksonJsonMessageConverter());
@@ -166,6 +275,7 @@ class WebSocketStompIntegrationTest {
     }
 
     @Configuration
+    @EnableTransactionManagement
     @EnableAutoConfiguration(exclude = {
             DataSourceAutoConfiguration.class,
             DataSourceTransactionManagerAutoConfiguration.class,
@@ -176,7 +286,9 @@ class WebSocketStompIntegrationTest {
             StompAuthChannelInterceptor.class,
             StompEventListener.class,
             WebSocketErrorHandler.class,
-            StockMessagePublisher.class
+            StockMessagePublisher.class,
+            LatestPriceStore.class,
+            StockPriceListener.class
     })
     static class SocketOnlyApp {
     }
