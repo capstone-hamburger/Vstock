@@ -12,7 +12,8 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class StockCandleId implements Serializable {
 
-    private Long stockId;
+    // @ManyToOne 식별자(stock)의 PK 타입. 속성 이름은 엔티티의 stock과 같아야 한다.
+    private Long stock;
     private CandleInterval candleInterval;
     private LocalDateTime timestamp;
 }

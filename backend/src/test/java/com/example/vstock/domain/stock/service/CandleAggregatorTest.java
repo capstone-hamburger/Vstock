@@ -15,6 +15,7 @@ import com.example.vstock.domain.stock.entity.CandleInterval;
 import com.example.vstock.domain.stock.entity.Sector;
 import com.example.vstock.domain.stock.entity.Stock;
 import com.example.vstock.domain.stock.entity.StockCandle;
+import com.example.vstock.domain.stock.entity.StockCandleId;
 import com.example.vstock.domain.stock.event.TradeEvent;
 import com.example.vstock.domain.stock.repository.StockCandleRepository;
 import com.example.vstock.domain.stock.repository.StockRepository;
@@ -24,6 +25,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -33,6 +35,8 @@ class CandleAggregatorTest {
 
     private static final Long STOCK_ID = 1L;
     private static final LocalDateTime NINE = LocalDateTime.of(2026, 10, 27, 9, 0, 0);
+
+    private final Stock stock = stockWithId(STOCK_ID);
 
     private StockCandleRepository candleRepository;
     private StockRepository stockRepository;
@@ -96,7 +100,8 @@ class CandleAggregatorTest {
         aggregator.onTrade(trade(10_300, 2, NINE.plusMinutes(1).plusSeconds(5)));
 
         verify(candleRepository).upsertCandle(
-                STOCK_ID, CandleInterval.ONE_MINUTE, NINE, 10_000L, 10_100L, 10_000L, 10_100L, 12L);
+                STOCK_ID, CandleInterval.ONE_MINUTE, NINE, 10_000L, 10_100L, 10_000L, 10_100L, 12L,
+                millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(20)));
         CandleResponse next = aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE);
         assertThat(next.time()).isEqualTo(MarketTime.toEpochSecond(NINE.plusMinutes(1)));
         assertThat(next.open()).isEqualTo(10_300);
@@ -115,7 +120,7 @@ class CandleAggregatorTest {
         assertThat(tenMinutes.close()).isEqualTo(10_300);
         assertThat(tenMinutes.volume()).isEqualTo(7);
         verify(candleRepository, never()).upsertCandle(
-                any(), eq(CandleInterval.TEN_MINUTES), any(), any(), any(), any(), any(), any());
+                any(), eq(CandleInterval.TEN_MINUTES), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -126,9 +131,10 @@ class CandleAggregatorTest {
         aggregator.onTrade(trade(10_500, 1, NINE.plusMinutes(10).plusSeconds(5)));
 
         verify(candleRepository).upsertCandle(
-                STOCK_ID, CandleInterval.TEN_MINUTES, NINE, 10_000L, 10_400L, 10_000L, 10_400L, 8L);
+                STOCK_ID, CandleInterval.TEN_MINUTES, NINE, 10_000L, 10_400L, 10_000L, 10_400L, 8L,
+                millis(NINE.plusMinutes(2)), millis(NINE.plusMinutes(7)));
         verify(candleRepository, never()).upsertCandle(
-                any(), eq(CandleInterval.ONE_HOUR), any(), any(), any(), any(), any(), any());
+                any(), eq(CandleInterval.ONE_HOUR), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -150,7 +156,8 @@ class CandleAggregatorTest {
         aggregator.closeExpiredCandles();
 
         verify(candleRepository).upsertCandle(
-                STOCK_ID, CandleInterval.ONE_MINUTE, NINE, 10_000L, 10_000L, 10_000L, 10_000L, 5L);
+                STOCK_ID, CandleInterval.ONE_MINUTE, NINE, 10_000L, 10_000L, 10_000L, 10_000L, 5L,
+                millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(10)));
         assertThat(aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE)).isNull();
         // 10분봉은 아직 구간 안이라 유지된다.
         assertThat(aggregator.findCurrentCandle(STOCK_ID, CandleInterval.TEN_MINUTES)).isNotNull();
@@ -166,7 +173,8 @@ class CandleAggregatorTest {
 
         for (CandleInterval interval : CandleInterval.values()) {
             verify(candleRepository).upsertCandle(eq(STOCK_ID), eq(interval),
-                    eq(interval.bucketStart(lastMinute)), eq(10_000L), eq(10_000L), eq(10_000L), eq(10_000L), eq(5L));
+                    eq(interval.bucketStart(lastMinute)), eq(10_000L), eq(10_000L), eq(10_000L), eq(10_000L), eq(5L),
+                    eq(millis(lastMinute)), eq(millis(lastMinute)));
             assertThat(aggregator.findCurrentCandle(STOCK_ID, interval)).isNull();
         }
     }
@@ -178,25 +186,127 @@ class CandleAggregatorTest {
         clock.set(NINE.plusSeconds(50));
         aggregator.closeExpiredCandles();
 
-        verify(candleRepository, never()).upsertCandle(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(candleRepository, never()).upsertCandle(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertThat(aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE)).isNotNull();
     }
 
     @Test
-    void 이미_지난_구간의_체결은_무시한다() {
+    void 봉_안에서_순서가_뒤바뀐_체결도_체결_시각으로_open과_close를_정한다() {
+        aggregator.onTrade(trade(10_000, 1, NINE.plusSeconds(20)));
+        aggregator.onTrade(trade(9_000, 2, NINE.plusSeconds(10)));
+        aggregator.onTrade(trade(11_000, 3, NINE.plusSeconds(40)));
+        aggregator.onTrade(trade(10_500, 4, NINE.plusSeconds(30)));
+
+        CandleResponse candle = aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE);
+
+        assertThat(candle).extracting(CandleResponse::open, CandleResponse::high, CandleResponse::low,
+                CandleResponse::close, CandleResponse::volume).containsExactly(9_000L, 11_000L, 9_000L, 11_000L, 10L);
+    }
+
+    @Test
+    void 이미_마감된_구간의_늦은_체결은_저장된_봉에_합쳐_다시_저장한다() {
+        aggregator.onTrade(trade(10_000, 1, NINE.plusMinutes(1).plusSeconds(5)));
+        // 09:00 봉은 이미 저장돼 있다. open 10_000@09:00:10, close 10_200@09:00:50
+        when(candleRepository.findById(new StockCandleId(STOCK_ID, CandleInterval.ONE_MINUTE, NINE)))
+                .thenReturn(Optional.of(new StockCandle(stock, CandleInterval.ONE_MINUTE, NINE,
+                        10_000L, 10_300L, 9_900L, 10_200L, 10L,
+                        millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(50)))));
+
+        aggregator.onTrade(trade(20_000, 9, NINE.plusSeconds(30)));
+
+        // 시각이 첫 체결과 마지막 체결 사이라 open·close는 그대로이고 high와 volume만 바뀐다.
+        verify(candleRepository).upsertCandle(STOCK_ID, CandleInterval.ONE_MINUTE, NINE,
+                10_000L, 20_000L, 9_900L, 10_200L, 19L, millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(50)));
+        // 진행 중인 봉은 영향이 없다.
+        CandleResponse live = aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE);
+        assertThat(live.high()).isEqualTo(10_000);
+        assertThat(live.volume()).isEqualTo(1);
+    }
+
+    @Test
+    void 늦은_체결이_봉의_첫_체결보다_이르면_open이_바뀐다() {
+        aggregator.onTrade(trade(10_000, 1, NINE.plusMinutes(1).plusSeconds(5)));
+        when(candleRepository.findById(new StockCandleId(STOCK_ID, CandleInterval.ONE_MINUTE, NINE)))
+                .thenReturn(Optional.of(new StockCandle(stock, CandleInterval.ONE_MINUTE, NINE,
+                        10_000L, 10_300L, 9_900L, 10_200L, 10L,
+                        millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(50)))));
+
+        aggregator.onTrade(trade(9_500, 2, NINE.plusSeconds(5)));
+
+        verify(candleRepository).upsertCandle(STOCK_ID, CandleInterval.ONE_MINUTE, NINE,
+                9_500L, 10_300L, 9_500L, 10_200L, 12L, millis(NINE.plusSeconds(5)), millis(NINE.plusSeconds(50)));
+    }
+
+    @Test
+    void 늦은_체결이_봉의_마지막_체결보다_늦으면_close가_바뀐다() {
+        aggregator.onTrade(trade(10_000, 1, NINE.plusMinutes(1).plusSeconds(5)));
+        when(candleRepository.findById(new StockCandleId(STOCK_ID, CandleInterval.ONE_MINUTE, NINE)))
+                .thenReturn(Optional.of(new StockCandle(stock, CandleInterval.ONE_MINUTE, NINE,
+                        10_000L, 10_300L, 9_900L, 10_200L, 10L,
+                        millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(50)))));
+
+        aggregator.onTrade(trade(10_400, 2, NINE.plusSeconds(59)));
+
+        verify(candleRepository).upsertCandle(STOCK_ID, CandleInterval.ONE_MINUTE, NINE,
+                10_000L, 10_400L, 9_900L, 10_400L, 12L, millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(59)));
+    }
+
+    @Test
+    void 늦은_체결의_구간이_저장돼_있지_않으면_그_체결로_새_봉을_만든다() {
         aggregator.onTrade(trade(10_000, 5, NINE.plusMinutes(1).plusSeconds(5)));
 
         aggregator.onTrade(trade(20_000, 9, NINE.plusSeconds(30)));
 
-        CandleResponse candle = aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE);
-        assertThat(candle.high()).isEqualTo(10_000);
-        assertThat(candle.volume()).isEqualTo(5);
+        verify(candleRepository).upsertCandle(STOCK_ID, CandleInterval.ONE_MINUTE, NINE,
+                20_000L, 20_000L, 20_000L, 20_000L, 9L, millis(NINE.plusSeconds(30)), millis(NINE.plusSeconds(30)));
+    }
+
+    @Test
+    void 늦은_체결로_고친_봉은_마감된_봉으로_다시_발행한다() {
+        aggregator.onTrade(trade(10_000, 5, NINE.plusMinutes(1).plusSeconds(5)));
+
+        aggregator.onTrade(trade(20_000, 9, NINE.plusSeconds(30)));
+
+        ArgumentCaptor<CandleResponse> captor = ArgumentCaptor.forClass(CandleResponse.class);
+        verify(publisher, times(2)).publishCandle(eq(STOCK_ID), eq(CandleInterval.ONE_MINUTE), captor.capture());
+        CandleResponse corrected = captor.getAllValues().get(1);
+        assertThat(corrected.finalized()).isTrue();
+        assertThat(corrected.time()).isEqualTo(MarketTime.toEpochSecond(NINE));
+        assertThat(corrected.volume()).isEqualTo(9);
+    }
+
+    @Test
+    void 스케줄러가_이미_닫은_구간의_늦은_체결도_저장된_봉에_합친다() {
+        aggregator.onTrade(trade(10_000, 5, NINE.plusSeconds(10)));
+        clock.set(NINE.plusMinutes(1).plusSeconds(1));
+        aggregator.closeExpiredCandles();
+        when(candleRepository.findById(new StockCandleId(STOCK_ID, CandleInterval.ONE_MINUTE, NINE)))
+                .thenReturn(Optional.of(new StockCandle(stock, CandleInterval.ONE_MINUTE, NINE,
+                        10_000L, 10_000L, 10_000L, 10_000L, 5L,
+                        millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(10)))));
+
+        aggregator.onTrade(trade(10_700, 2, NINE.plusSeconds(55)));
+
+        verify(candleRepository).upsertCandle(STOCK_ID, CandleInterval.ONE_MINUTE, NINE,
+                10_000L, 10_700L, 10_000L, 10_700L, 7L, millis(NINE.plusSeconds(10)), millis(NINE.plusSeconds(55)));
+        // 이미 닫힌 구간이므로 진행 중인 봉으로 되살아나지 않는다.
+        assertThat(aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE)).isNull();
+    }
+
+    @Test
+    void 늦은_체결을_반영하다_저장이_실패해도_예외를_던지지_않는다() {
+        aggregator.onTrade(trade(10_000, 5, NINE.plusMinutes(1).plusSeconds(5)));
+        when(candleRepository.findById(any())).thenThrow(new RuntimeException("db down"));
+
+        aggregator.onTrade(trade(20_000, 9, NINE.plusSeconds(30)));
+
+        assertThat(aggregator.findCurrentCandle(STOCK_ID, CandleInterval.ONE_MINUTE).volume()).isEqualTo(5);
     }
 
     @Test
     void 저장이_실패해도_체결_처리는_계속된다() {
         doThrow(new RuntimeException("db down")).when(candleRepository)
-                .upsertCandle(any(), any(), any(), any(), any(), any(), any(), any());
+                .upsertCandle(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
         aggregator.onTrade(trade(10_000, 5, NINE.plusSeconds(10)));
 
         aggregator.onTrade(trade(10_300, 2, NINE.plusMinutes(1).plusSeconds(5)));
@@ -280,7 +390,11 @@ class CandleAggregatorTest {
 
     private StockCandle stored(CandleInterval interval, LocalDateTime start,
                                long open, long high, long low, long close, long volume) {
-        return new StockCandle(STOCK_ID, interval, start, open, high, low, close, volume);
+        return new StockCandle(stock, interval, start, open, high, low, close, volume, millis(start), millis(start));
+    }
+
+    private static long millis(LocalDateTime time) {
+        return time.atZone(MarketTime.ZONE).toInstant().toEpochMilli();
     }
 
     private TradeEvent trade(long price, long quantity, LocalDateTime executedAt) {
@@ -314,5 +428,11 @@ class CandleAggregatorTest {
         public Instant instant() {
             return now;
         }
+    }
+
+    private static Stock stockWithId(Long stockId) {
+        Stock stock = new Stock("테스트종목", Sector.IT, 10_000L);
+        ReflectionTestUtils.setField(stock, "stockId", stockId);
+        return stock;
     }
 }

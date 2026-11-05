@@ -35,6 +35,8 @@ class StockServiceTest {
     private static final Long STOCK_ID = 1L;
     private static final LocalDateTime NINE = LocalDateTime.of(2026, 10, 27, 9, 0, 0);
 
+    private final Stock stock = stockWithId(STOCK_ID);
+
     private StockRepository stockRepository;
     private LatestPriceStore latestPriceStore;
     private StockCandleRepository candleRepository;
@@ -171,7 +173,7 @@ class StockServiceTest {
     }
 
     private StockCandle stored(CandleInterval interval, LocalDateTime start) {
-        return new StockCandle(STOCK_ID, interval, start, 10_000L, 10_200L, 9_900L, 10_100L, 10L);
+        return new StockCandle(stock, interval, start, 10_000L, 10_200L, 9_900L, 10_100L, 10L, 0L, 0L);
     }
 
     private CandleResponse live(LocalDateTime start) {
@@ -211,5 +213,11 @@ class StockServiceTest {
         Stock stock = new Stock("테스트종목", Sector.IT, 10_000L);
         ReflectionTestUtils.setField(stock, "stockId", stockId);
         when(stockRepository.findById(stockId)).thenReturn(Optional.of(stock));
+    }
+
+    private static Stock stockWithId(Long stockId) {
+        Stock stock = new Stock("테스트종목", Sector.IT, 10_000L);
+        ReflectionTestUtils.setField(stock, "stockId", stockId);
+        return stock;
     }
 }

@@ -30,7 +30,7 @@ public final class WebSocketDestination {
         return format(STOCK_ORDERBOOK, stockId);
     }
 
-    /** 종목의 봉 갱신 경로. intervalCode는 {@code 1m}, {@code 5m}, {@code 1h}, {@code 1d} 중 하나다. */
+    /** 종목의 봉 갱신 경로. intervalCode는 {@code 1m}, {@code 10m}, {@code 1h}, {@code 1d}, {@code 1M} 중 하나다. */
     public static String stockCandle(Long stockId, String intervalCode) {
         if (intervalCode == null || intervalCode.isBlank()) {
             throw new IllegalArgumentException("intervalCode은(는) 비어 있을 수 없습니다.");

@@ -4,6 +4,7 @@ import com.example.vstock.domain.stock.dto.CandleResponse;
 import com.example.vstock.domain.stock.entity.CandleInterval;
 import com.example.vstock.domain.stock.entity.Stock;
 import com.example.vstock.domain.stock.entity.StockCandle;
+import com.example.vstock.domain.stock.entity.StockCandleId;
 import com.example.vstock.domain.stock.event.TradeEvent;
 import com.example.vstock.domain.stock.repository.StockCandleRepository;
 import com.example.vstock.domain.stock.repository.StockRepository;
@@ -29,6 +30,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * 요청한 간격의 행만 읽는다.
  *
  * 모든 상태 접근은 이 객체의 락 안에서 일어난다. 종목 수가 적고 갱신이 가벼워 락 하나로 충분하다.
+ * 순서가 뒤바뀌어 늦게 도착한 체결은 버리지 않고 저장된 봉에 합쳐 다시 저장한다.
  * 서버가 재시작되면 진행 중이던 1분봉은 유실되고, 나머지 진행 중인 봉은 한 단계 낮은 간격의
  * 저장된 봉으로 다시 채운다.
  */
@@ -59,23 +61,50 @@ public class CandleAggregator {
     private void applyTrade(TradeEvent event, CandleInterval interval, LocalDateTime bucket, long seq) {
         CandleKey key = new CandleKey(event.stockId(), interval);
         LiveCandle live = current.get(key);
+        long tradedAt = event.executedAt().toEpochMilli();
 
-        if (live != null && bucket.isBefore(live.startTime())) {
-            log.warn("이미 지난 구간의 체결이라 무시한다. stockId={}, interval={}, executedAt={}",
-                    event.stockId(), interval.getCode(), event.executedAt());
+        // 진행 중인 봉보다 앞선 구간이거나, 진행 중인 봉이 없는데 이미 지난 구간이면 늦게 도착한 체결이다.
+        boolean late = live != null
+                ? bucket.isBefore(live.startTime())
+                : bucket.isBefore(interval.bucketStart(LocalDateTime.now(clock)));
+        if (late) {
+            correctClosedCandle(event, key, bucket, seq, tradedAt);
             return;
         }
+
         if (live != null && bucket.isAfter(live.startTime())) {
             finish(key, live);
             live = null;
         }
         if (live == null) {
-            live = new LiveCandle(bucket, event.price());
+            live = new LiveCandle(bucket, event.price(), tradedAt);
             current.put(key, live);
         }
-
-        live.apply(event.price(), event.quantity(), seq);
+        live.apply(event.price(), event.quantity(), seq, tradedAt);
         messagePublisher.publishCandle(event.stockId(), interval, live.toResponse(false));
+    }
+
+    /**
+     * 이미 마감돼 저장된 봉에 늦게 도착한 체결을 합쳐 다시 저장하고, 고쳐진 봉을 {@code finalized=true}로
+     * 다시 발행한다. high·low·volume은 순서와 무관하게 합치고, open·close는 체결 시각으로 정한다.
+     * 그 구간의 봉이 아직 저장돼 있지 않으면 이 체결만으로 새 봉을 만든다.
+     */
+    private void correctClosedCandle(TradeEvent event, CandleKey key, LocalDateTime bucket, long seq, long tradedAt) {
+        try {
+            LiveCandle candle = candleRepository
+                    .findById(new StockCandleId(key.stockId(), key.interval(), bucket))
+                    .map(LiveCandle::fromStored)
+                    .orElseGet(() -> new LiveCandle(bucket, event.price(), tradedAt));
+            // 새로 만든 봉은 생성자에서 이 체결의 가격·시각을 이미 담고 있어 volume만 더해진다.
+            candle.apply(event.price(), event.quantity(), seq, tradedAt);
+            persist(key, candle);
+            messagePublisher.publishCandle(key.stockId(), key.interval(), candle.toResponse(true));
+            log.info("늦게 도착한 체결을 저장된 봉에 반영했다. stockId={}, interval={}, executedAt={}",
+                    key.stockId(), key.interval().getCode(), event.executedAt());
+        } catch (RuntimeException e) {
+            log.error("늦게 도착한 체결을 봉에 반영하지 못했다. stockId={}, interval={}, executedAt={}",
+                    key.stockId(), key.interval().getCode(), event.executedAt(), e);
+        }
     }
 
     /**
@@ -152,7 +181,8 @@ public class CandleAggregator {
     private void persist(CandleKey key, LiveCandle live) {
         try {
             candleRepository.upsertCandle(key.stockId(), key.interval(), live.startTime(),
-                    live.open(), live.high(), live.low(), live.close(), live.volume());
+                    live.open(), live.high(), live.low(), live.close(), live.volume(),
+                    live.firstTradeAt(), live.lastTradeAt());
         } catch (RuntimeException e) {
             log.error("봉 저장에 실패했다. stockId={}, interval={}, startTime={}",
                     key.stockId(), key.interval().getCode(), live.startTime(), e);
