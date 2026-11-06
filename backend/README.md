@@ -85,6 +85,29 @@ docker compose up -d
 | 발행 prefix | `/app` (클라이언트 → 서버) |
 | 체결가 경로 | `/topic/stocks/{stockId}/price` |
 | 호가 경로 | `/topic/stocks/{stockId}/orderbook` |
+| 봉 경로 | `/topic/stocks/{stockId}/candles/{interval}` (`1m`, `10m`, `1h`, `1d`, `1M`) |
+| 종목 스냅샷 | `GET /stocks/{stockId}` (진입 시 1회) |
+
+종목 스냅샷 응답과 체결가 푸시 형식은 다음과 같다. 스냅샷의 `currentPrice`는 소켓과 같은 기준(최근 체결가, 체결이 없으면 DB 값)이라 스냅샷을 받은 뒤 구독해도 값이 어긋나지 않는다.
+
+```json
+// GET /stocks/1
+{ "stockId": 1, "name": "삼성전자", "sector": "IT", "currentPrice": 70300 }
+
+// /topic/stocks/1/price (체결 1건마다)
+{ "stockId": 1, "price": 70300, "quantity": 5, "executedAt": 1793059200000 }
+```
+
+`executedAt`은 epoch 밀리초다. 없는 종목은 404.
+
+### 봉 푸시 규칙
+
+봉(`/candles/{interval}`)은 체결 1건이 아니라 **그 봉의 전체 상태**를 보낸다. 클라이언트는 같은 `time`의 봉을 통째로 교체한다.
+
+- **구독한 간격만 보낸다.** 그 경로를 구독하는 연결이 없으면 메시지를 만들지 않는다. 간격을 바꾸면 새 간격을 구독한 뒤 REST로 현재 봉부터 받는다. (구독자 수는 `SubscriptionRegistry`가 센다.)
+- **진행 중인 봉(`finalized: false`)은 모아서 보낸다.** 경로별로 최신 상태만 들고 있다가 `vstock.websocket.candle-flush-millis`(기본 100ms)마다 한 번씩 보낸다. 봉은 교체하는 값이라 중간 상태를 건너뛰어도 결과가 같다.
+- **마감된 봉(`finalized: true`)은 즉시 보낸다.** 모아 둔 이전 진행 상태는 버린다.
+- 체결가(`/price`)는 체결마다 바로 보낸다.
 
 ### 구성
 
@@ -94,16 +117,23 @@ global/
 │   └── WebSocketConfig.java            # 엔드포인트·브로커·인터셉터·에러핸들러 등록
 ├── websocket/
 │   ├── WebSocketDestination.java       # 구독·발행 경로 (문자열은 여기서만 만든다)
-│   ├── StompAuthChannelInterceptor.java # CONNECT 인증 (#5 전까지 통과만 함)
+│   ├── StompAuthChannelInterceptor.java # CONNECT 인증 (#5 전까지 통과) + 클라이언트 SEND를 /app으로 제한
 │   ├── StompEventListener.java         # 연결·구독 생명주기 로깅
+│   ├── SubscriptionRegistry.java       # 경로별 구독자 수 (구독한 봉만 발행하기 위해)
 │   └── WebSocketErrorHandler.java      # STOMP 예외 로깅 후 ERROR 프레임
 └── security/                           # Spring Security 설정 (#5에서 구현)
 
 domain/stock/
-├── controller/                         # 차트·호가창 REST / STOMP 컨트롤러 (추후)
+├── controller/
+│   └── StockController.java            # GET /stocks/{stockId}
+├── event/
+│   └── TradeEvent.java                 # 체결 1건 (체결 엔진 연동부가 발행)
 ├── service/
-│   └── StockMessagePublisher.java      # 종목 변경분 발행
-└── dto/                                # REST 스냅샷과 소켓 메시지 공용 DTO (추후)
+│   ├── StockService.java               # 종목 스냅샷 (최근 체결가 우선)
+│   ├── LatestPriceStore.java           # 종목별 최근 체결가 (메모리)
+│   ├── StockPriceListener.java         # TradeEvent → 현재가 갱신 + /price 푸시
+│   └── StockMessagePublisher.java      # 종목 변경분 발행 (봉은 구독 간격만, 진행 봉은 모아서)
+└── dto/                                # StockResponse, PriceResponse
 ```
 
 소켓 **공통 설정은 `global/`**, **도메인별 발행은 `domain/<도메인>/service/`** 에 둔다. 발행할 때는 도메인 publisher를 주입받아 쓰고, 경로 문자열이나 `SimpMessagingTemplate`을 직접 다루지 않는다.
@@ -113,6 +143,8 @@ stockMessagePublisher.publishPrice(stockId, payload);
 stockMessagePublisher.publishOrderbook(stockId, payload);
 ```
 
+> 클라이언트가 `/topic/...`로 직접 SEND하면 다른 구독자에게 가짜 시세를 뿌릴 수 있어서, 클라이언트의 SEND는 `/app/...`만 허용하고 나머지는 ERROR 프레임으로 거절한다. 서버가 발행하는 메시지에는 영향이 없다.
+>
 > `StompAuthChannelInterceptor`는 **아직 인증을 하지 않는다.** 로그인(#5)이 없어 토큰 검증 지점만 잡아둔 상태이고, 차트·호가창은 비로그인 구독 대상이라 현재는 통과시킨다. 인증이 필요한 구독을 추가하기 전에 반드시 채워야 한다.
 
 ### 허용 Origin
@@ -134,14 +166,18 @@ const client = new StompJs.Client({ brokerURL: 'ws://localhost:8080/ws' });
 client.onConnect = () => {
   client.subscribe('/topic/stocks/1/price', (msg) => console.log(JSON.parse(msg.body)));
 };
-client.activate();
+client.activate();   // 연결
+
+client.deactivate(); // 연결 끊기 (STOMP DISCONNECT 후 소켓 종료, 구독은 서버가 함께 정리한다)
 ```
+
+종목 화면을 벗어날 때는 `deactivate()`를 호출한다. 탭이 닫히거나 네트워크가 끊겨 DISCONNECT를 못 보내는 경우를 위해 서버는 하트비트(10초)를 켜 두었고, 클라이언트가 하트비트를 협상했다면(`@stomp/stompjs`는 기본 10초) 그 시간 안에 신호가 없는 세션을 끊어서 정리한다.
 
 구독자가 없을 때 발행된 메시지는 예외 없이 버려진다. 놓친 구간은 REST 스냅샷으로 다시 받는 것을 전제한다.
 
 > 현재 브로커는 **인메모리**다. 서버를 여러 대로 늘리면 인스턴스별로 구독이 분리되므로 외부 브로커(Redis/RabbitMQ)로 교체해야 한다.
 >
-> 차트·호가창 REST 조회 API와 실제 발행 지점(체결 엔진 연동)은 후속 이슈 범위다.
+> `TradeEvent`를 실제로 발행하는 지점(체결 엔진 연동)은 후속 이슈 범위다. 그 전까지 `/price`는 이벤트를 직접 발행해야 움직인다.
 
 ---
 
