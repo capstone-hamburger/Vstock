@@ -2,7 +2,9 @@ package com.example.vstock.global.websocket;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.vstock.domain.stock.dto.CandleResponse;
 import com.example.vstock.domain.stock.dto.PriceResponse;
+import com.example.vstock.domain.stock.entity.CandleInterval;
 import com.example.vstock.domain.stock.event.TradeEvent;
 import com.example.vstock.domain.stock.service.LatestPriceStore;
 import com.example.vstock.domain.stock.service.StockMessagePublisher;
@@ -24,6 +26,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.messaging.simp.broker.SimpleBrokerMessageHandler;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.messaging.converter.JacksonJsonMessageConverter;
@@ -59,6 +62,9 @@ class WebSocketStompIntegrationTest {
 
     @Autowired
     private StockMessagePublisher publisher;
+
+    @Autowired
+    private SubscriptionRegistry subscriptionRegistry;
 
     @Autowired
     private ApplicationEventPublisher eventPublisher;
@@ -219,6 +225,43 @@ class WebSocketStompIntegrationTest {
     }
 
     @Test
+    void 구독한_간격의_봉은_모아서_보내고_구독하지_않은_간격은_받지_않는다() throws Exception {
+        StompSession session = connect();
+        BlockingQueue<CandleResponse> oneMinute =
+                subscribe(session, WebSocketDestination.stockCandle(8L, "1m"), CandleResponse.class);
+        CandleResponse candle = new CandleResponse(1_793_059_200L, 100, 120, 90, 110, 7, false, 3);
+
+        CandleResponse received = awaitFirst(oneMinute, () -> {
+            publisher.publishCandle(8L, CandleInterval.TEN_MINUTES, candle);
+            publisher.publishCandle(8L, CandleInterval.ONE_MINUTE, candle);
+        });
+
+        assertThat(received.time()).isEqualTo(1_793_059_200L);
+        assertThat(received.close()).isEqualTo(110L);
+        assertThat(received.finalized()).isFalse();
+        session.disconnect();
+    }
+
+    @Test
+    void 연결을_끊으면_그_연결의_봉_구독이_정리된다() throws Exception {
+        String destination = WebSocketDestination.stockCandle(9L, "1m");
+        StompSession session = connect();
+        BlockingQueue<CandleResponse> received =
+                subscribe(session, destination, CandleResponse.class);
+        awaitFirst(received, () -> publisher.publishCandle(9L, CandleInterval.ONE_MINUTE,
+                new CandleResponse(1_793_059_200L, 100, 120, 90, 110, 7, true, 3)));
+        assertThat(subscriptionRegistry.hasSubscribers(destination)).isTrue();
+
+        session.disconnect();
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
+        while (subscriptionRegistry.hasSubscribers(destination) && System.nanoTime() < deadline) {
+            Thread.sleep(50L);
+        }
+        assertThat(subscriptionRegistry.hasSubscribers(destination)).isFalse();
+    }
+
+    @Test
     void 응답하지_않는_연결을_정리하도록_하트비트가_설정돼_있다() {
         assertThat(brokerMessageHandler.getHeartbeatValue())
                 .containsExactly(WebSocketConfig.HEARTBEAT_MILLIS, WebSocketConfig.HEARTBEAT_MILLIS);
@@ -275,6 +318,7 @@ class WebSocketStompIntegrationTest {
     }
 
     @Configuration
+    @EnableScheduling
     @EnableTransactionManagement
     @EnableAutoConfiguration(exclude = {
             DataSourceAutoConfiguration.class,
@@ -285,6 +329,7 @@ class WebSocketStompIntegrationTest {
             WebSocketConfig.class,
             StompAuthChannelInterceptor.class,
             StompEventListener.class,
+            SubscriptionRegistry.class,
             WebSocketErrorHandler.class,
             StockMessagePublisher.class,
             LatestPriceStore.class,

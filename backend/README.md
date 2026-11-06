@@ -85,6 +85,7 @@ docker compose up -d
 | 발행 prefix | `/app` (클라이언트 → 서버) |
 | 체결가 경로 | `/topic/stocks/{stockId}/price` |
 | 호가 경로 | `/topic/stocks/{stockId}/orderbook` |
+| 봉 경로 | `/topic/stocks/{stockId}/candles/{interval}` (`1m`, `10m`, `1h`, `1d`, `1M`) |
 | 종목 스냅샷 | `GET /stocks/{stockId}` (진입 시 1회) |
 
 종목 스냅샷 응답과 체결가 푸시 형식은 다음과 같다. 스냅샷의 `currentPrice`는 소켓과 같은 기준(최근 체결가, 체결이 없으면 DB 값)이라 스냅샷을 받은 뒤 구독해도 값이 어긋나지 않는다.
@@ -99,6 +100,15 @@ docker compose up -d
 
 `executedAt`은 epoch 밀리초다. 없는 종목은 404.
 
+### 봉 푸시 규칙
+
+봉(`/candles/{interval}`)은 체결 1건이 아니라 **그 봉의 전체 상태**를 보낸다. 클라이언트는 같은 `time`의 봉을 통째로 교체한다.
+
+- **구독한 간격만 보낸다.** 그 경로를 구독하는 연결이 없으면 메시지를 만들지 않는다. 간격을 바꾸면 새 간격을 구독한 뒤 REST로 현재 봉부터 받는다. (구독자 수는 `SubscriptionRegistry`가 센다.)
+- **진행 중인 봉(`finalized: false`)은 모아서 보낸다.** 경로별로 최신 상태만 들고 있다가 `vstock.websocket.candle-flush-millis`(기본 100ms)마다 한 번씩 보낸다. 봉은 교체하는 값이라 중간 상태를 건너뛰어도 결과가 같다.
+- **마감된 봉(`finalized: true`)은 즉시 보낸다.** 모아 둔 이전 진행 상태는 버린다.
+- 체결가(`/price`)는 체결마다 바로 보낸다.
+
 ### 구성
 
 ```
@@ -109,6 +119,7 @@ global/
 │   ├── WebSocketDestination.java       # 구독·발행 경로 (문자열은 여기서만 만든다)
 │   ├── StompAuthChannelInterceptor.java # CONNECT 인증 (#5 전까지 통과) + 클라이언트 SEND를 /app으로 제한
 │   ├── StompEventListener.java         # 연결·구독 생명주기 로깅
+│   ├── SubscriptionRegistry.java       # 경로별 구독자 수 (구독한 봉만 발행하기 위해)
 │   └── WebSocketErrorHandler.java      # STOMP 예외 로깅 후 ERROR 프레임
 └── security/                           # Spring Security 설정 (#5에서 구현)
 
@@ -121,7 +132,7 @@ domain/stock/
 │   ├── StockService.java               # 종목 스냅샷 (최근 체결가 우선)
 │   ├── LatestPriceStore.java           # 종목별 최근 체결가 (메모리)
 │   ├── StockPriceListener.java         # TradeEvent → 현재가 갱신 + /price 푸시
-│   └── StockMessagePublisher.java      # 종목 변경분 발행
+│   └── StockMessagePublisher.java      # 종목 변경분 발행 (봉은 구독 간격만, 진행 봉은 모아서)
 └── dto/                                # StockResponse, PriceResponse
 ```
 
