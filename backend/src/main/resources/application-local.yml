@@ -1,8 +1,8 @@
 spring:
   # backend/.env 파일이 있으면 프로퍼티로 읽는다 (없으면 OS 환경변수 사용)
-  # 실행 디렉터리 기준 경로이므로 backend/ 에서 실행해야 한다
+  # 실행 디렉터리 기준 경로다. backend/ 에서 실행하면 첫 번째, 저장소 루트에서 IDE로 실행하면 두 번째 경로를 읽는다
   config:
-    import: optional:file:.env[.properties]
+    import: optional:file:.env[.properties],optional:file:backend/.env[.properties]
 
   datasource:
     url: ${DB_URL}
