@@ -63,3 +63,9 @@ Vstock 모노레포의 **공통 협업 프로세스** 문서. 브랜치/커밋/�
 - `.idea/`, `.vscode/` 등 개인 IDE 설정
 
 새로 무시해야 할 파일이 생기면 해당 영역의 `.gitignore`에 추가한다 (공통은 루트, 백엔드는 `backend/`, 프론트엔드는 `frontend/`).
+
+---
+
+## 6. AI 도구 기여자 표기
+
+커밋, PR, 브랜치, 이슈에 AI 도구(Claude 등)를 기여자나 작성자로 표기하지 않는다. `Co-Authored-By`로 도구를 넣지 않고, PR·이슈 본문에 `Generated with ...` 같은 생성 표기도 넣지 않으며, 브랜치와 제목에 도구 이름을 쓰지 않는다. Claude용 작업 규칙은 [CLAUDE.md](CLAUDE.md)에 있다.
