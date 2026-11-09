@@ -18,6 +18,25 @@ class WebSocketDestinationTest {
     }
 
     @Test
+    void 종목_봉_경로를_만든다() {
+        assertThat(WebSocketDestination.stockCandle(7L, "5m")).isEqualTo("/topic/stocks/7/candles/5m");
+    }
+
+    @Test
+    void interval이_다르면_봉_경로가_겹치지_않는다() {
+        assertThat(WebSocketDestination.stockCandle(1L, "1m"))
+                .isNotEqualTo(WebSocketDestination.stockCandle(1L, "5m"));
+    }
+
+    @Test
+    void 봉_경로의_stockId_또는_interval이_비어_있으면_예외가_발생한다() {
+        assertThatThrownBy(() -> WebSocketDestination.stockCandle(null, "1m"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> WebSocketDestination.stockCandle(1L, " "))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void 종목이_다르면_경로가_겹치지_않는다() {
         assertThat(WebSocketDestination.stockPrice(1L))
                 .isNotEqualTo(WebSocketDestination.stockPrice(2L));
