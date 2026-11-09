@@ -129,6 +129,22 @@ class StockCandleRepositoryTest extends RepositoryTestSupport {
     }
 
     @Test
+    void 간격과_종목이_같은_봉_중_가장_최근_하나를_조회한다() {
+        candleRepository.upsertCandle(stockId, CandleInterval.ONE_MINUTE, NINE, 1L, 1L, 1L, 1L, 1L, 0L, 0L);
+        candleRepository.upsertCandle(stockId, CandleInterval.ONE_MINUTE, NINE.plusMinutes(2), 3L, 3L, 3L, 3L, 1L, 0L, 0L);
+        candleRepository.upsertCandle(stockId, CandleInterval.ONE_MINUTE, NINE.plusMinutes(1), 2L, 2L, 2L, 2L, 1L, 0L, 0L);
+        candleRepository.upsertCandle(stockId, CandleInterval.TEN_MINUTES, NINE.plusMinutes(10), 9L, 9L, 9L, 9L, 1L, 0L, 0L);
+        candleRepository.upsertCandle(otherStockId, CandleInterval.ONE_MINUTE, NINE.plusMinutes(30), 8L, 8L, 8L, 8L, 1L, 0L, 0L);
+        flushAndClear();
+
+        assertThat(candleRepository.findFirstByStock_StockIdAndCandleIntervalOrderByTimestampDesc(
+                stockId, CandleInterval.ONE_MINUTE))
+                .get().extracting(StockCandle::getClosePrice).isEqualTo(3L);
+        assertThat(candleRepository.findFirstByStock_StockIdAndCandleIntervalOrderByTimestampDesc(
+                stockId, CandleInterval.ONE_HOUR)).isEmpty();
+    }
+
+    @Test
     void 없는_종목의_봉은_외래키_제약으로_저장할_수_없다() {
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
             candleRepository.upsertCandle(stockId + 1_000L, CandleInterval.ONE_MINUTE, NINE, 1L, 1L, 1L, 1L, 1L, 0L, 0L);

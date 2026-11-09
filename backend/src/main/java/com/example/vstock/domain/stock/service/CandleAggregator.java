@@ -177,7 +177,8 @@ public class CandleAggregator {
         messagePublisher.publishCandle(key.stockId(), key.interval(), live.toResponse(true));
     }
 
-    // 저장이 끝난 뒤에 마감 메시지를 보낸다. 저장이 실패해도 체결 처리는 계속한다.
+    // 저장이 끝난 뒤에 마감 메시지를 보낸다. 저장이 실패해도 체결 처리는 계속하므로, 이때는 소켓에는 확정 봉이
+    // 나갔는데 DB에는 없어 새로고침하면 그 봉이 사라진다. 재시도는 없다(체결 원본이 저장되면 다시 만들 수 있다).
     private void persist(CandleKey key, LiveCandle live) {
         try {
             candleRepository.upsertCandle(key.stockId(), key.interval(), live.startTime(),

@@ -88,7 +88,7 @@ docker compose up -d
 | 봉 경로 | `/topic/stocks/{stockId}/candles/{interval}` (`1m`, `10m`, `1h`, `1d`, `1M`) |
 | 종목 스냅샷 | `GET /stocks/{stockId}` (진입 시 1회) |
 
-종목 스냅샷 응답과 체결가 푸시 형식은 다음과 같다. 스냅샷의 `currentPrice`는 소켓과 같은 기준(최근 체결가, 체결이 없으면 DB 값)이라 스냅샷을 받은 뒤 구독해도 값이 어긋나지 않는다.
+종목 스냅샷 응답과 체결가 푸시 형식은 다음과 같다. 스냅샷의 `currentPrice`는 소켓과 같은 기준(최근 체결가, 체결이 없으면 DB 값)이고, 서버를 재시작한 직후에는 저장된 마지막 1분봉의 종가로 시작한다. 그래서 스냅샷을 받은 뒤 구독해도 값이 어긋나지 않는다.
 
 ```json
 // GET /stocks/1
@@ -131,6 +131,7 @@ domain/stock/
 ├── service/
 │   ├── StockService.java               # 종목 스냅샷 (최근 체결가 우선)
 │   ├── LatestPriceStore.java           # 종목별 최근 체결가 (메모리)
+│   ├── LatestPriceInitializer.java     # 서버 시작 시 마지막 1분봉 종가로 최근 체결가 복구
 │   ├── StockPriceListener.java         # TradeEvent → 현재가 갱신 + /price 푸시
 │   └── StockMessagePublisher.java      # 종목 변경분 발행 (봉은 구독 간격만, 진행 봉은 모아서)
 └── dto/                                # StockResponse, PriceResponse

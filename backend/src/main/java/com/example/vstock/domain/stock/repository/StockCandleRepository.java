@@ -5,6 +5,7 @@ import com.example.vstock.domain.stock.entity.StockCandle;
 import com.example.vstock.domain.stock.entity.StockCandleId;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -49,6 +50,10 @@ public interface StockCandleRepository extends JpaRepository<StockCandle, StockC
                          @Param("high") Long high, @Param("low") Long low, @Param("close") Long close,
                          @Param("volume") Long volume,
                          @Param("firstTradeAt") Long firstTradeAt, @Param("lastTradeAt") Long lastTradeAt);
+
+    /** 그 간격으로 저장된 가장 최근 봉 하나. 서버 시작 시 마지막 체결가를 되살리는 데 쓴다. */
+    Optional<StockCandle> findFirstByStock_StockIdAndCandleIntervalOrderByTimestampDesc(
+            Long stockId, CandleInterval candleInterval);
 
     /** 시작 시각이 [from, before)인 봉을 최신순으로 조회한다. PK 범위 스캔이라 limit만큼만 읽는다. */
     @Query("""
