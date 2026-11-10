@@ -20,7 +20,7 @@ public abstract class RepositoryTestSupport {
 
     // FK 참조 순서대로 삭제
     private static final String[] TABLES = {
-            "orders", "user_stocks", "bot_parameters", "bots", "stocks", "users"
+            "trades", "stock_candles", "orders", "user_stocks", "bot_parameters", "bots", "stocks", "users"
     };
 
     @Autowired
