@@ -12,24 +12,28 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler;
 
 @Configuration
 public class OrderSecurityConfig {
 
+    private static final String LOGIN_PATH = "/auth/login";
+
     @Bean
     SecurityFilterChain orderSecurityFilterChain(HttpSecurity http) throws Exception {
         return http
-                .securityMatcher("/orders/**", "/auth/csrf", "/auth/login", "/auth/logout")
+                .securityMatcher("/orders/**", "/auth/csrf", LOGIN_PATH, "/auth/logout")
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/auth/csrf", "/auth/login").permitAll()
+                        .requestMatchers("/auth/csrf", LOGIN_PATH).permitAll()
                         .anyRequest().hasRole("USER"))
                 .requestCache(AbstractHttpConfigurer::disable)
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
+                .addFilterBefore(new LoginRequestFilter(LOGIN_PATH), UsernamePasswordAuthenticationFilter.class)
                 .formLogin(form -> form
-                        .loginPage("/auth/login")
-                        .loginProcessingUrl("/auth/login")
+                        .loginPage(LOGIN_PATH)
+                        .loginProcessingUrl(LOGIN_PATH)
                         .usernameParameter("email")
                         .successHandler((request, response, authentication) ->
                                 response.setStatus(HttpStatus.NO_CONTENT.value()))

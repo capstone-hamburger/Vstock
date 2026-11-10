@@ -21,6 +21,7 @@ import com.example.vstock.domain.user.entity.User;
 import com.example.vstock.domain.userstock.entity.UserStock;
 import com.jayway.jsonpath.JsonPath;
 import jakarta.persistence.EntityManager;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -341,6 +342,54 @@ class OrderControllerTest {
     }
 
     @Test
+    void UTF8로_정확히_72바이트인_비밀번호로_로그인할_수_있다() throws Exception {
+        String password = "한".repeat(24);
+        assertThat(password.getBytes(StandardCharsets.UTF_8)).hasSize(72);
+        User boundaryUser = new User("경계값회원", "boundary-order@test.com",
+                passwordEncoder.encode(password), 100_000L, 0L);
+        em.persist(boundaryUser);
+
+        mockMvc.perform(loginRequest(findCsrf(null), boundaryUser.getEmail(), password))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
+    void UTF8로_73바이트인_비밀번호는_거절하고_로그인하지_않는다() throws Exception {
+        String password = "가".repeat(23) + "abcd";
+        assertThat(password.getBytes(StandardCharsets.UTF_8)).hasSize(73);
+        SessionCsrf anonymous = findCsrf(null);
+
+        mockMvc.perform(loginRequest(anonymous, user.getEmail(), password))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(anonymous.withSession(delete("/orders/{orderId}", 1)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void 로그인_URL의_쿼리는_폼_본문이_있어도_거절한다() throws Exception {
+        SessionCsrf anonymous = findCsrf(null);
+
+        mockMvc.perform(anonymous.withSession(post("/auth/login"))
+                        .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                        .queryParam("email", "query-only@example.test")
+                        .queryParam("password", "query-only"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(loginRequest(anonymous, user.getEmail(), PASSWORD)
+                        .queryParam("email", "query-mixed@example.test"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(anonymous.withSession(delete("/orders/{orderId}", 1)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void 로그인은_URL_인코딩_폼_본문만_받는다() throws Exception {
+        mockMvc.perform(findCsrf(null).withSession(post("/auth/login"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"order-api@test.com\",\"password\":\"unused\"}"))
+                .andExpect(status().isUnsupportedMediaType());
+    }
+
+    @Test
     void 로그아웃하면_기존_세션이_무효화된다() throws Exception {
         mockMvc.perform(signedIn.withSession(post("/auth/logout")))
                 .andExpect(status().isNoContent());
@@ -368,9 +417,10 @@ class OrderControllerTest {
 
     private MockHttpServletRequestBuilder loginRequest(SessionCsrf csrf, String email, String password) {
         return csrf.withSession(post("/auth/login"))
+                .characterEncoding(StandardCharsets.UTF_8)
                 .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-                .param("email", email)
-                .param("password", password);
+                .formField("email", email)
+                .formField("password", password);
     }
 
     private SessionCsrf findCsrf(MockHttpSession session) throws Exception {

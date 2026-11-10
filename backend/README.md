@@ -231,7 +231,7 @@ com.example.vstock
 ### 로그인과 CSRF
 
 1. `GET /auth/csrf`에서 세션 쿠키와 응답 JSON의 `headerName`·`token`을 받는다.
-2. 같은 쿠키와 CSRF 헤더를 보내면서 `POST /auth/login`을 호출한다. 본문은 `application/x-www-form-urlencoded` 형식의 `email`, `password`다. 성공하면 `204 No Content`, 자격 증명이 틀리면 `401 Unauthorized`다.
+2. 같은 쿠키와 CSRF 헤더를 보내면서 `POST /auth/login`을 호출한다. `email`, `password`는 `application/x-www-form-urlencoded` 본문에 넣는다. 비밀번호는 UTF-8 기준 최대 72바이트다. URL 쿼리나 72바이트 초과 입력은 `400`, 다른 본문 형식은 `415`를 반환한다. 성공은 `204`, 자격 증명 불일치는 `401`이다.
 3. 로그인 응답의 새 세션 쿠키를 사용해 `GET /auth/csrf`를 다시 호출한다. 주문 생성·취소와 `POST /auth/logout`에 새 CSRF 토큰을 보낸다. 로그아웃은 `204`를 반환하고 세션을 무효화한다.
 
 로그인 계정은 `users` 테이블에 BCrypt 해시로 준비한다. 기존 평문 비밀번호가 있는 계정은 비밀번호를 재설정해 해시를 저장해야 한다. 회원가입은 별도 작업이다. 브라우저는 같은 출처에서 쿠키를 전달하고, 배포 환경에서는 HTTPS를 사용한다.
