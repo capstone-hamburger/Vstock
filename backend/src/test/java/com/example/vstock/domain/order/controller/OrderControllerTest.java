@@ -2,6 +2,7 @@ package com.example.vstock.domain.order.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -18,6 +19,7 @@ import com.example.vstock.domain.stock.entity.Sector;
 import com.example.vstock.domain.stock.entity.Stock;
 import com.example.vstock.domain.user.entity.User;
 import com.example.vstock.domain.userstock.entity.UserStock;
+import com.jayway.jsonpath.JsonPath;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,8 +29,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpSession;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,6 +41,8 @@ import org.springframework.transaction.annotation.Transactional;
 @AutoConfigureMockMvc
 @Transactional
 class OrderControllerTest {
+
+    private static final String PASSWORD = "order-test-password";
 
     @Autowired
     private MockMvc mockMvc;
@@ -49,17 +56,22 @@ class OrderControllerTest {
     @Autowired
     private OrderRepository orderRepository;
 
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    private SessionCsrf signedIn;
     private User user;
     private Stock stock;
 
     @BeforeEach
-    void setUp() {
-        user = new User("주문테스트", "order-api@test.com", "password", 100_000L, 0L);
+    void setUp() throws Exception {
+        user = new User("주문테스트", "order-api@test.com", passwordEncoder.encode(PASSWORD), 100_000L, 0L);
         stock = new Stock("주문테스트종목", Sector.IT, 10_000L);
         em.persist(user);
         em.persist(stock);
         em.persist(new UserStock(user, stock, 10, 9_000L));
         em.flush();
+        signedIn = signIn(user.getEmail());
     }
 
     @Test
@@ -99,7 +111,7 @@ class OrderControllerTest {
         Stock other = new Stock("다른종목", Sector.FINANCE, 10_000L);
         em.persist(other);
 
-        mockMvc.perform(post("/users/{userId}/orders", user.getUserId())
+        mockMvc.perform(signedIn.withSession(post("/orders"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"stockId\":%d,\"type\":\"BUY\",\"quantity\":4,\"price\":10000}"
                                 .formatted(other.getStockId())))
@@ -112,7 +124,7 @@ class OrderControllerTest {
         mockMvc.perform(createRequest("\"type\":\"BUY\",\"quantity\":1,\"price\":10000"))
                 .andExpect(status().isConflict());
 
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), order.getOrderId()))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", order.getOrderId())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CANCELED"));
 
@@ -127,7 +139,7 @@ class OrderControllerTest {
         mockMvc.perform(createRequest("\"type\":\"SELL\",\"quantity\":1,\"price\":10000"))
                 .andExpect(status().isConflict());
 
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), order.getOrderId()))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", order.getOrderId())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CANCELED"));
 
@@ -140,7 +152,7 @@ class OrderControllerTest {
         Stock other = new Stock("미보유종목", Sector.MEDICAL, 10_000L);
         em.persist(other);
 
-        mockMvc.perform(post("/users/{userId}/orders", user.getUserId())
+        mockMvc.perform(signedIn.withSession(post("/orders"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"stockId\":%d,\"type\":\"SELL\",\"quantity\":1,\"price\":10000}"
                                 .formatted(other.getStockId())))
@@ -177,7 +189,7 @@ class OrderControllerTest {
         ReflectionTestUtils.setField(order, "filledQuantity", 3);
         em.persist(order);
 
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), order.getOrderId()))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", order.getOrderId())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("CANCELED"))
                 .andExpect(jsonPath("$.filledQuantity").value(3));
@@ -190,10 +202,11 @@ class OrderControllerTest {
     @Test
     void 다른_회원의_주문은_취소할_수_없다() throws Exception {
         OrderResponse order = createOrder(OrderType.BUY, 1);
-        User other = new User("다른회원", "other-order@test.com", "password", 100_000L, 0L);
+        User other = new User("다른회원", "other-order@test.com", user.getPassword(), 100_000L, 0L);
         em.persist(other);
 
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", other.getUserId(), order.getOrderId()))
+        SessionCsrf otherSession = signIn(other.getEmail());
+        mockMvc.perform(otherSession.withSession(delete("/orders/{orderId}", order.getOrderId())))
                 .andExpect(status().isNotFound());
         assertThat(orderRepository.findById(order.getOrderId()).orElseThrow().getStatus())
                 .isEqualTo(OrderStatus.PENDING);
@@ -205,7 +218,7 @@ class OrderControllerTest {
         Order order = Order.ofBot(bot, stock, OrderType.SELL, 1, 10_000L);
         em.persist(order);
 
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), order.getOrderId()))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", order.getOrderId())))
                 .andExpect(status().isNotFound());
     }
 
@@ -216,27 +229,22 @@ class OrderControllerTest {
         ReflectionTestUtils.setField(order, "filledQuantity", 1);
         em.persist(order);
 
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), order.getOrderId()))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", order.getOrderId())))
                 .andExpect(status().isConflict());
 
         OrderResponse pending = createOrder(OrderType.BUY, 1);
         orderService.deleteOrder(user.getUserId(), pending.getOrderId());
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), pending.getOrderId()))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", pending.getOrderId())))
                 .andExpect(status().isConflict());
     }
 
     @Test
-    void 존재하지_않는_회원과_종목과_주문은_404를_반환한다() throws Exception {
-        mockMvc.perform(post("/users/{userId}/orders", Long.MAX_VALUE)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"stockId\":%d,\"type\":\"BUY\",\"quantity\":1,\"price\":10000}"
-                                .formatted(stock.getStockId())))
-                .andExpect(status().isNotFound());
-        mockMvc.perform(post("/users/{userId}/orders", user.getUserId())
+    void 존재하지_않는_종목과_주문은_404를_반환한다() throws Exception {
+        mockMvc.perform(signedIn.withSession(post("/orders"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"stockId\":9223372036854775807,\"type\":\"BUY\",\"quantity\":1,\"price\":10000}"))
                 .andExpect(status().isNotFound());
-        mockMvc.perform(delete("/users/{userId}/orders/{orderId}", user.getUserId(), Long.MAX_VALUE))
+        mockMvc.perform(signedIn.withSession(delete("/orders/{orderId}", Long.MAX_VALUE)))
                 .andExpect(status().isNotFound());
     }
 
@@ -265,13 +273,115 @@ class OrderControllerTest {
 
     @Test
     void 필수_종목과_본문이_없으면_400을_반환한다() throws Exception {
-        mockMvc.perform(post("/users/{userId}/orders", user.getUserId())
+        mockMvc.perform(signedIn.withSession(post("/orders"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"BUY\",\"quantity\":1,\"price\":10000}"))
                 .andExpect(status().isBadRequest());
-        mockMvc.perform(post("/users/{userId}/orders", user.getUserId())
+        mockMvc.perform(signedIn.withSession(post("/orders"))
                         .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void 로그인하지_않으면_주문_생성과_취소가_거절된다() throws Exception {
+        OrderResponse order = createOrder(OrderType.BUY, 1);
+        SessionCsrf anonymous = findCsrf(null);
+
+        mockMvc.perform(anonymous.withSession(post("/orders"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(orderBody("\"type\":\"BUY\",\"quantity\":1,\"price\":10000")))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(anonymous.withSession(delete("/orders/{orderId}", order.getOrderId())))
+                .andExpect(status().isUnauthorized());
+
+        assertThat(orderRepository.findAllByUserAndTypeAndStatus(user, OrderType.BUY, OrderStatus.PENDING))
+                .extracting(Order::getOrderId)
+                .containsExactly(order.getOrderId());
+    }
+
+    @Test
+    void 요청의_회원_ID와_상관없이_로그인한_회원의_주문으로_저장한다() throws Exception {
+        User other = new User("다른회원", "other-order@test.com", user.getPassword(), 100_000L, 0L);
+        em.persist(other);
+
+        mockMvc.perform(createRequest("\"type\":\"BUY\",\"quantity\":1,\"price\":10000,\"userId\":"
+                        + other.getUserId())
+                        .queryParam("userId", other.getUserId().toString()))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.userId").value(user.getUserId()));
+
+        assertThat(orderRepository.findAllByUserAndTypeAndStatus(user, OrderType.BUY, OrderStatus.PENDING))
+                .hasSize(1);
+        assertThat(orderRepository.findAllByUserAndTypeAndStatus(other, OrderType.BUY, OrderStatus.PENDING))
+                .isEmpty();
+    }
+
+    @Test
+    void 로그인했어도_CSRF_토큰이_없으면_주문_생성과_취소를_거절한다() throws Exception {
+        OrderResponse order = createOrder(OrderType.BUY, 1);
+
+        mockMvc.perform(post("/orders").session(signedIn.session())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(orderBody("\"type\":\"BUY\",\"quantity\":1,\"price\":10000")))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(delete("/orders/{orderId}", order.getOrderId()).session(signedIn.session()))
+                .andExpect(status().isForbidden());
+        assertThat(orderRepository.findAllByUserAndTypeAndStatus(user, OrderType.BUY, OrderStatus.PENDING))
+                .extracting(Order::getOrderId)
+                .containsExactly(order.getOrderId());
+    }
+
+    @Test
+    void 틀린_비밀번호로는_로그인할_수_없다() throws Exception {
+        SessionCsrf anonymous = findCsrf(null);
+        mockMvc.perform(loginRequest(anonymous, user.getEmail(), "incorrect-password"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(anonymous.withSession(delete("/orders/{orderId}", 1)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void 로그아웃하면_기존_세션이_무효화된다() throws Exception {
+        mockMvc.perform(signedIn.withSession(post("/auth/logout")))
+                .andExpect(status().isNoContent());
+        assertThat(signedIn.session().isInvalid()).isTrue();
+    }
+
+    @Test
+    void 기존_회원_ID_경로는_주문을_생성할_수_없다() throws Exception {
+        mockMvc.perform(signedIn.withSession(post("/users/{userId}/orders", user.getUserId()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(orderBody("\"type\":\"BUY\",\"quantity\":1,\"price\":10000")))
+                .andExpect(status().isNotFound());
+        assertThat(orderRepository.findAllByUserAndTypeAndStatus(user, OrderType.BUY, OrderStatus.PENDING))
+                .isEmpty();
+    }
+
+    private SessionCsrf signIn(String email) throws Exception {
+        SessionCsrf anonymous = findCsrf(null);
+        MvcResult result = mockMvc.perform(loginRequest(anonymous, email, PASSWORD))
+                .andExpect(status().isNoContent())
+                .andReturn();
+        MockHttpSession session = (MockHttpSession) result.getRequest().getSession(false);
+        return findCsrf(session);
+    }
+
+    private MockHttpServletRequestBuilder loginRequest(SessionCsrf csrf, String email, String password) {
+        return csrf.withSession(post("/auth/login"))
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .param("email", email)
+                .param("password", password);
+    }
+
+    private SessionCsrf findCsrf(MockHttpSession session) throws Exception {
+        MockHttpServletRequestBuilder request = get("/auth/csrf");
+        if (session != null) {
+            request.session(session);
+        }
+        MvcResult result = mockMvc.perform(request).andExpect(status().isOk()).andReturn();
+        String response = result.getResponse().getContentAsString();
+        return new SessionCsrf((MockHttpSession) result.getRequest().getSession(false),
+                JsonPath.read(response, "$.headerName"), JsonPath.read(response, "$.token"));
     }
 
     private OrderResponse createOrder(OrderType type, int quantity) {
@@ -280,8 +390,19 @@ class OrderControllerTest {
     }
 
     private MockHttpServletRequestBuilder createRequest(String fields) {
-        return post("/users/{userId}/orders", user.getUserId())
+        return signedIn.withSession(post("/orders"))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"stockId\":" + stock.getStockId() + "," + fields + "}");
+                .content(orderBody(fields));
+    }
+
+    private String orderBody(String fields) {
+        return "{\"stockId\":" + stock.getStockId() + "," + fields + "}";
+    }
+
+    private record SessionCsrf(MockHttpSession session, String csrfHeader, String csrfToken) {
+
+        MockHttpServletRequestBuilder withSession(MockHttpServletRequestBuilder request) {
+            return request.session(session).header(csrfHeader, csrfToken);
+        }
     }
 }

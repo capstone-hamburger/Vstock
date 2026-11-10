@@ -1,13 +1,31 @@
-# DB에 존재하는 회원·종목 ID를 입력한다. 주문 ID는 생성 응답에서 확인한다.
 @baseUrl = http://localhost:8080
-@userId = 1
 @stockId = 1
-@buyOrderId = 1
-@sellOrderId = 2
+
+### 로그인 전 CSRF 토큰
+GET {{baseUrl}}/auth/csrf
+
+> {%
+    client.global.set("orderCsrf", response.body.token);
+%}
+
+### 로그인 (private environment에 URL 인코딩한 자격 증명을 입력한다)
+POST {{baseUrl}}/auth/login
+Content-Type: application/x-www-form-urlencoded
+X-CSRF-TOKEN: {{orderCsrf}}
+
+email={{orderEmailEncoded}}&password={{orderPasswordEncoded}}
+
+### 로그인 후 CSRF 토큰
+GET {{baseUrl}}/auth/csrf
+
+> {%
+    client.global.set("orderCsrf", response.body.token);
+%}
 
 ### 매수 요청
-POST {{baseUrl}}/users/{{userId}}/orders
+POST {{baseUrl}}/orders
 Content-Type: application/json
+X-CSRF-TOKEN: {{orderCsrf}}
 
 {
   "stockId": {{stockId}},
@@ -16,9 +34,14 @@ Content-Type: application/json
   "price": 10000
 }
 
+> {%
+    if (response.status === 201) client.global.set("buyOrderId", response.body.orderId);
+%}
+
 ### 매도 요청 (보유 주식이 있는 회원)
-POST {{baseUrl}}/users/{{userId}}/orders
+POST {{baseUrl}}/orders
 Content-Type: application/json
+X-CSRF-TOKEN: {{orderCsrf}}
 
 {
   "stockId": {{stockId}},
@@ -27,11 +50,21 @@ Content-Type: application/json
   "price": 10000
 }
 
+> {%
+    if (response.status === 201) client.global.set("sellOrderId", response.body.orderId);
+%}
+
 ### 매수 주문 취소
-DELETE {{baseUrl}}/users/{{userId}}/orders/{{buyOrderId}}
+DELETE {{baseUrl}}/orders/{{buyOrderId}}
+X-CSRF-TOKEN: {{orderCsrf}}
 
 ### 매도 주문 취소
-DELETE {{baseUrl}}/users/{{userId}}/orders/{{sellOrderId}}
+DELETE {{baseUrl}}/orders/{{sellOrderId}}
+X-CSRF-TOKEN: {{orderCsrf}}
 
 ### 현재가 조회
 GET {{baseUrl}}/stocks/{{stockId}}
+
+### 로그아웃
+POST {{baseUrl}}/auth/logout
+X-CSRF-TOKEN: {{orderCsrf}}

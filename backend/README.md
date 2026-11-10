@@ -146,7 +146,7 @@ stockMessagePublisher.publishOrderbook(stockId, payload);
 
 > 클라이언트가 `/topic/...`로 직접 SEND하면 다른 구독자에게 가짜 시세를 뿌릴 수 있어서, 클라이언트의 SEND는 `/app/...`만 허용하고 나머지는 ERROR 프레임으로 거절한다. 서버가 발행하는 메시지에는 영향이 없다.
 >
-> `StompAuthChannelInterceptor`는 **아직 인증을 하지 않는다.** 로그인(#5)이 없어 토큰 검증 지점만 잡아둔 상태이고, 차트·호가창은 비로그인 구독 대상이라 현재는 통과시킨다. 인증이 필요한 구독을 추가하기 전에 반드시 채워야 한다.
+> `StompAuthChannelInterceptor`는 **아직 인증을 하지 않는다.** 차트·호가창은 공개 구독 대상이고, 주문 세션 인증은 HTTP 주문 경로에 적용된다. 인증이 필요한 구독을 추가하기 전에 반드시 채워야 한다.
 
 ### 허용 Origin
 
@@ -226,11 +226,28 @@ com.example.vstock
 
 ## 주문 API
 
-이전한 주문 API는 회원 ID를 경로로 받는 프로토타입이다. 세션·JWT 인증은 아직 없으므로 회원 ID가 일치하는지 확인하는 것은 본인 인증을 의미하지 않는다. 최신 코드 컨벤션은 인증 주체에서 회원 ID를 가져오도록 요구한다. 로그인·인증 구현과 통합할 때 `@AuthenticationPrincipal`을 사용하고 주문 경로를 `POST /orders`, `DELETE /orders/{orderId}`로 전환해야 한다.
+주문자 ID는 로그인 세션의 `@AuthenticationPrincipal`에서 가져온다. 취소는 로그인 회원이 소유한 주문으로 조회 범위를 제한한다.
+
+### 로그인과 CSRF
+
+1. `GET /auth/csrf`에서 세션 쿠키와 응답 JSON의 `headerName`·`token`을 받는다.
+2. 같은 쿠키와 CSRF 헤더를 보내면서 `POST /auth/login`을 호출한다. 본문은 `application/x-www-form-urlencoded` 형식의 `email`, `password`다. 성공하면 `204 No Content`, 자격 증명이 틀리면 `401 Unauthorized`다.
+3. 로그인 응답의 새 세션 쿠키를 사용해 `GET /auth/csrf`를 다시 호출한다. 주문 생성·취소와 `POST /auth/logout`에 새 CSRF 토큰을 보낸다. 로그아웃은 `204`를 반환하고 세션을 무효화한다.
+
+로그인 계정은 `users` 테이블에 BCrypt 해시로 준비한다. 기존 평문 비밀번호가 있는 계정은 비밀번호를 재설정해 해시를 저장해야 한다. 회원가입은 별도 작업이다. 브라우저는 같은 출처에서 쿠키를 전달하고, 배포 환경에서는 HTTPS를 사용한다.
+
+로컬 DB에서만 확인할 경우 `htpasswd -nBC 10 vstock-local`을 실행해 테스트 비밀번호의 해시를 만든 뒤, 출력에서 `vstock-local:` 뒤의 해시를 넣는다.
+
+```sql
+INSERT INTO users (name, email, password, balance, investment, created_at, updated_at)
+VALUES ('로컬 주문 테스트', 'order-local@example.test', '<BCrypt 해시>', 100000, 0, NOW(), NOW());
+```
+
+IntelliJ HTTP Client에서는 `backend/http/http-client.private.env.json`에 `local` 환경을 만들고, `orderEmailEncoded`와 `orderPasswordEncoded`에 URL 인코딩한 이메일·비밀번호를 넣는다. CSRF 조회 → 로그인 → 로그인 후 CSRF 조회 순서로 실행한다. 로그인에 사용한 세션 쿠키는 HTTP Client가 이어서 보낸다.
 
 ### 매수·매도 요청
 
-`POST /users/{userId}/orders`
+`POST /orders`
 
 ```json
 {
@@ -250,10 +267,10 @@ com.example.vstock
 
 ### 매수·매도 취소
 
-`DELETE /users/{userId}/orders/{orderId}`
+`DELETE /orders/{orderId}`
 
 - 성공하면 `200 OK`와 `CANCELED` 주문을 반환한다. 주문 행은 삭제하지 않는다.
-- 경로의 회원이 소유한 대기 주문만 취소할 수 있다. 봇 주문은 이 API로 취소하지 않는다.
+- 로그인한 회원이 소유한 대기 주문만 취소할 수 있다. 다른 회원·봇의 주문은 없는 주문과 동일하게 `404`를 반환한다.
 - 일부 체결된 주문은 기존 `filledQuantity`를 유지하고 미체결 잔량의 예약만 해제한다.
 - 체결 완료·이미 취소된 주문은 `409 Conflict`를 반환한다.
 
@@ -266,6 +283,8 @@ com.example.vstock
 ### 주문 응답과 확인 방법
 
 - 잘못된 입력: `400 Bad Request`
-- 없는 회원·종목·주문 또는 경로의 회원이 소유하지 않은 주문: `404 Not Found`
+- 로그인 세션 없음 또는 로그인 자격 증명 오류: `401 Unauthorized` (유효한 CSRF 헤더를 보낸 요청)
+- CSRF 헤더 누락 또는 불일치: `403 Forbidden`
+- 없는 회원·종목·주문 또는 로그인 회원이 소유하지 않은 주문: `404 Not Found`
 - 잔고·보유 수량 부족 또는 취소 불가능한 상태: `409 Conflict`
-- IntelliJ HTTP Client 예시는 `http/orders.http`에 있다. DB에 존재하는 회원·종목 ID와 응답으로 받은 주문 ID를 입력해 사용한다.
+- IntelliJ HTTP Client 예시는 `http/orders.http`에 있다. DB에 존재하는 종목 ID를 지정한다. 매도하려면 로그인 회원의 보유 주식도 필요하다.
