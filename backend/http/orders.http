@@ -1,0 +1,70 @@
+@baseUrl = http://localhost:8080
+@stockId = 1
+
+### 로그인 전 CSRF 토큰
+GET {{baseUrl}}/auth/csrf
+
+> {%
+    client.global.set("orderCsrf", response.body.token);
+%}
+
+### 로그인 (private environment에 URL 인코딩한 자격 증명을 입력한다)
+POST {{baseUrl}}/auth/login
+Content-Type: application/x-www-form-urlencoded
+X-CSRF-TOKEN: {{orderCsrf}}
+
+email={{orderEmailEncoded}}&password={{orderPasswordEncoded}}
+
+### 로그인 후 CSRF 토큰
+GET {{baseUrl}}/auth/csrf
+
+> {%
+    client.global.set("orderCsrf", response.body.token);
+%}
+
+### 매수 요청
+POST {{baseUrl}}/orders
+Content-Type: application/json
+X-CSRF-TOKEN: {{orderCsrf}}
+
+{
+  "stockId": {{stockId}},
+  "type": "BUY",
+  "quantity": 1,
+  "price": 10000
+}
+
+> {%
+    if (response.status === 201) client.global.set("buyOrderId", response.body.orderId);
+%}
+
+### 매도 요청 (보유 주식이 있는 회원)
+POST {{baseUrl}}/orders
+Content-Type: application/json
+X-CSRF-TOKEN: {{orderCsrf}}
+
+{
+  "stockId": {{stockId}},
+  "type": "SELL",
+  "quantity": 1,
+  "price": 10000
+}
+
+> {%
+    if (response.status === 201) client.global.set("sellOrderId", response.body.orderId);
+%}
+
+### 매수 주문 취소
+DELETE {{baseUrl}}/orders/{{buyOrderId}}
+X-CSRF-TOKEN: {{orderCsrf}}
+
+### 매도 주문 취소
+DELETE {{baseUrl}}/orders/{{sellOrderId}}
+X-CSRF-TOKEN: {{orderCsrf}}
+
+### 현재가 조회
+GET {{baseUrl}}/stocks/{{stockId}}
+
+### 로그아웃
+POST {{baseUrl}}/auth/logout
+X-CSRF-TOKEN: {{orderCsrf}}

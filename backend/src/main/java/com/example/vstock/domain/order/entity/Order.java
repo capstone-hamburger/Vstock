@@ -89,13 +89,13 @@ public class Order extends BaseTimeEntity {
 
     public static Order ofUser(User user, Stock stock, OrderType type, int quantity, Long price) {
         requireNonNull(user, "user");
-        validateCommon(stock, type, price);
+        validateCommon(stock, type, quantity, price);
         return new Order(TraderType.USER, user, null, stock, type, quantity, price);
     }
 
     public static Order ofBot(Bot bot, Stock stock, OrderType type, int quantity, Long price) {
         requireNonNull(bot, "bot");
-        validateCommon(stock, type, price);
+        validateCommon(stock, type, quantity, price);
         return new Order(TraderType.BOT, null, bot, stock, type, quantity, price);
     }
 
@@ -111,10 +111,25 @@ public class Order extends BaseTimeEntity {
         }
     }
 
-    private static void validateCommon(Stock stock, OrderType type, Long price) {
+    public void updateStatusToCanceled() {
+        if (status != OrderStatus.PENDING || quantity <= filledQuantity) {
+            throw new IllegalStateException("취소 가능한 미체결 주문이 없습니다.");
+        }
+        status = OrderStatus.CANCELED;
+    }
+
+    private static void validateCommon(Stock stock, OrderType type, int quantity, Long price) {
         requireNonNull(stock, "stock");
         requireNonNull(type, "type");
         requireNonNull(price, "price");
+        if (quantity <= 0 || price <= 0) {
+            throw new IllegalArgumentException("주문 수량과 가격은 0보다 커야 합니다.");
+        }
+        try {
+            Math.multiplyExact(price, (long) quantity);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("주문 금액이 허용 범위를 초과했습니다.");
+        }
     }
 
     private static void requireNonNull(Object value, String fieldName) {

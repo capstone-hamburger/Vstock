@@ -4,6 +4,13 @@ spring:
   profiles:
     active: local
 
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+    datatype:
+      enum:
+        fail-on-numbers-for-enums: true
+
   jpa:
     hibernate:
       ddl-auto: update

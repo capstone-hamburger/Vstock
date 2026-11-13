@@ -30,7 +30,7 @@ public class User extends BaseTimeEntity {
     @Column(nullable = false, unique = true)
     private String email;
 
-    // 해시 저장 예정
+    // 로그인용 비밀번호는 BCrypt 해시로 저장한다.
     @Column(nullable = false)
     private String password;
 
